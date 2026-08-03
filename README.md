@@ -25,14 +25,18 @@ rule, in which case it is terminated after the configured grace period.
 
 ## Usage
 
-1. Run `auto-idle-close.exe`. The settings window lists running applications —
-   tick the ones to manage, tune the timeout per rule.
+1. Run `auto-idle-close.exe`. The main window lists running applications by
+   window title (with a 🔍 filter box) — tick the ones to manage, tune the
+   timeout per rule.
 2. Apps that aren't running yet can be added by exe name (*Add by name*) or
-   picked from disk (*Browse…*). Rules with a known path get a `⋯` menu with
+   picked from disk (*Browse…*). Rules with a known path get a `…` menu with
    **Start now** and **Create desktop shortcut**.
-3. Closing the window hides it to the tray; left-click the tray clock icon to
+3. The **⚙ Settings** button opens a separate window with global options
+   (warning length, pause, Explorer integration) and a collapsible *Recent
+   activity* list.
+4. Closing the window hides it to the tray; left-click the tray clock icon to
    reopen, right-click for Pause / Exit.
-4. Settings save automatically to `config.toml` beside the exe (keep the exe in
+5. Settings save automatically to `config.toml` beside the exe (keep the exe in
    a writable folder).
 
 ### Running apps *through* auto-idle-close

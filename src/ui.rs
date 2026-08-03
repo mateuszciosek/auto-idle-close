@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,6 +13,12 @@ use crate::tray::{Tray, TrayMsg};
 use crate::win;
 
 const RUNNING_REFRESH: Duration = Duration::from_secs(2);
+/// Config writes are debounced: saved this long after the last edit.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(700);
+
+// NOTE on icon glyphs: egui's embedded fonts (Ubuntu-Light, NotoEmoji,
+// emoji-icon-font) cover only a subset of Unicode. …/🗑/▶/⚙/🔍 are verified
+// present; ⋯ (U+22EF) and ✕ (U+2715) are NOT — they render as boxes.
 
 #[derive(Clone)]
 struct ActiveWarning {
@@ -28,25 +35,47 @@ struct AppRow {
     admin: bool,
 }
 
-pub struct App {
+/// State shared with the deferred viewports (settings window, warning popup).
+/// Their callbacks must be Send + Sync and outlive the frame, so everything
+/// they touch lives behind this.
+struct Shared {
     cfg: Arc<Mutex<Config>>,
+    log: Mutex<VecDeque<(Instant, String)>>,
+    /// Time of the last unsaved edit (drives the debounced save).
+    dirty_since: Mutex<Option<Instant>>,
+    ctx_menu_installed: AtomicBool,
+    settings_open: AtomicBool,
+}
+
+impl Shared {
+    fn push_log(&self, message: String) {
+        let mut log = self.log.lock().unwrap();
+        log.push_front((Instant::now(), message));
+        log.truncate(20);
+    }
+
+    fn mark_dirty(&self) {
+        *self.dirty_since.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+pub struct App {
+    shared: Arc<Shared>,
     cmd_tx: Sender<MonitorCmd>,
     evt_rx: Receiver<MonitorEvent>,
     tray_rx: Receiver<TrayMsg>,
     tray: Tray,
-    /// Shared with the deferred warning viewport (its callback must be
-    /// Send + Sync and outlive this frame).
     warnings: Arc<Mutex<Vec<ActiveWarning>>>,
-    /// Sender clone for the deferred viewport callback (Sender is !Sync).
+    /// Sender clone for the warning viewport callback (Sender is !Sync).
     shared_cmd_tx: Arc<Mutex<Sender<MonitorCmd>>>,
-    log: VecDeque<(Instant, String)>,
     running: Vec<AppRow>,
     /// pid -> (lowercase exe name, full path); None = unqueryable (elevated).
     exe_cache: HashMap<u32, Option<(String, String)>>,
     last_refresh: Option<Instant>,
+    app_filter: String,
     add_rule_text: String,
-    ctx_menu_installed: bool,
-    dirty: bool,
+    /// Mirrors cfg.paused so the tray checkmark follows edits from anywhere.
+    last_paused: bool,
     save_error: Option<String>,
     allow_exit: bool,
 }
@@ -59,29 +88,30 @@ impl App {
         tray_rx: Receiver<TrayMsg>,
         tray: Tray,
     ) -> Self {
+        let last_paused = cfg.lock().unwrap().paused;
         Self {
-            cfg,
+            shared: Arc::new(Shared {
+                cfg,
+                log: Mutex::new(VecDeque::new()),
+                dirty_since: Mutex::new(None),
+                ctx_menu_installed: AtomicBool::new(launcher::context_menu_installed()),
+                settings_open: AtomicBool::new(false),
+            }),
             shared_cmd_tx: Arc::new(Mutex::new(cmd_tx.clone())),
             cmd_tx,
             evt_rx,
             tray_rx,
             tray,
             warnings: Arc::new(Mutex::new(Vec::new())),
-            log: VecDeque::new(),
             running: Vec::new(),
             exe_cache: HashMap::new(),
             last_refresh: None,
+            app_filter: String::new(),
             add_rule_text: String::new(),
-            ctx_menu_installed: launcher::context_menu_installed(),
-            dirty: false,
+            last_paused,
             save_error: None,
             allow_exit: false,
         }
-    }
-
-    fn push_log(&mut self, message: String) {
-        self.log.push_front((Instant::now(), message));
-        self.log.truncate(20);
     }
 
     fn drain_channels(&mut self, ctx: &egui::Context) {
@@ -93,13 +123,12 @@ impl App {
                 }
                 TrayMsg::TogglePause => {
                     let paused = {
-                        let mut cfg = self.cfg.lock().unwrap();
+                        let mut cfg = self.shared.cfg.lock().unwrap();
                         cfg.paused = !cfg.paused;
                         cfg.paused
                     };
-                    self.tray.set_paused(paused);
-                    self.dirty = true;
-                    self.push_log(if paused {
+                    self.shared.mark_dirty();
+                    self.shared.push_log(if paused {
                         "Monitoring paused".into()
                     } else {
                         "Monitoring resumed".into()
@@ -108,7 +137,7 @@ impl App {
                 TrayMsg::Exit => {
                     self.allow_exit = true;
                     let _ = self.cmd_tx.send(MonitorCmd::Shutdown);
-                    self.save_if_dirty();
+                    self.save_now();
                     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
@@ -127,7 +156,7 @@ impl App {
                 MonitorEvent::Closed { pid, exe, forced } => {
                     warnings.retain(|w| w.pid != pid);
                     drop(warnings);
-                    self.push_log(if forced {
+                    self.shared.push_log(if forced {
                         format!("Force-closed {exe}")
                     } else {
                         format!("Closed {exe}")
@@ -136,13 +165,14 @@ impl App {
                 MonitorEvent::CloseFailed { pid, exe } => {
                     warnings.retain(|w| w.pid != pid);
                     drop(warnings);
-                    self.push_log(format!(
+                    self.shared.push_log(format!(
                         "{exe} did not close (unsaved changes?) — timer restarted"
                     ));
                 }
                 MonitorEvent::LaunchBound { exe } => {
                     drop(warnings);
-                    self.push_log(format!("{exe} started and bound for auto-close"));
+                    self.shared
+                        .push_log(format!("{exe} started and bound for auto-close"));
                 }
             }
         }
@@ -204,44 +234,73 @@ impl App {
         self.exe_cache.retain(|pid, _| seen_pids.contains_key(pid));
 
         let mut rows: Vec<AppRow> = by_exe.into_values().collect();
-        rows.sort_by(|a, b| a.exe.cmp(&b.exe));
+        // Window titles are what the user recognizes — sort by them.
+        rows.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         admin_rows.sort_by(|a, b| a.title.cmp(&b.title));
         rows.extend(admin_rows);
         self.running = rows;
     }
 
-    fn save_if_dirty(&mut self) {
-        if !self.dirty {
-            return;
-        }
-        self.dirty = false;
-        let cfg = self.cfg.lock().unwrap().clone();
+    fn save_now(&mut self) {
+        *self.shared.dirty_since.lock().unwrap() = None;
+        let cfg = self.shared.cfg.lock().unwrap().clone();
         self.save_error = config::save(&cfg)
             .err()
             .map(|e| format!("Could not save config.toml: {e}"));
     }
 
+    fn save_if_settled(&mut self) {
+        let due = self
+            .shared
+            .dirty_since
+            .lock()
+            .unwrap()
+            .is_some_and(|t| t.elapsed() >= SAVE_DEBOUNCE);
+        if due {
+            self.save_now();
+        }
+    }
+
     fn section_running(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Running applications");
+        ui.horizontal(|ui| {
+            ui.heading("Running applications");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.app_filter)
+                        .hint_text("🔍 filter")
+                        .desired_width(140.0),
+                );
+            });
+        });
         ui.label(
             RichText::new("Tick an application to close it automatically when idle.")
                 .weak()
                 .small(),
         );
         ui.add_space(4.0);
+
+        let filter = self.app_filter.trim().to_lowercase();
         egui::ScrollArea::vertical()
             .id_salt("running")
-            .max_height(220.0)
+            .max_height(240.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 let mut changes: Vec<(String, Option<String>, bool)> = Vec::new();
+                let mut shown = 0usize;
                 {
-                    let cfg = self.cfg.lock().unwrap();
+                    let cfg = self.shared.cfg.lock().unwrap();
                     for row in &self.running {
+                        if !filter.is_empty()
+                            && !row.title.to_lowercase().contains(&filter)
+                            && !row.exe.contains(&filter)
+                        {
+                            continue;
+                        }
+                        shown += 1;
                         ui.horizontal(|ui| {
                             if row.admin {
                                 ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
-                                ui.label(RichText::new(truncate(&row.title, 46)).weak());
+                                ui.label(RichText::new(truncate(&row.title, 44)).weak());
                                 ui.label(
                                     RichText::new("(admin — cannot manage)").weak().small(),
                                 );
@@ -252,20 +311,23 @@ impl App {
                             if ui.checkbox(&mut checked, "").changed() {
                                 changes.push((row.exe.clone(), row.path.clone(), checked));
                             }
-                            ui.label(RichText::new(&row.exe).strong());
-                            let mut title = truncate(&row.title, 40).to_string();
+                            let mut title = truncate(&row.title, 44);
                             if row.windows > 1 {
-                                title.push_str(&format!("  (+{} windows)", row.windows - 1));
+                                title.push_str(&format!(" (+{})", row.windows - 1));
                             }
-                            ui.label(RichText::new(title).weak());
+                            ui.label(RichText::new(title).strong())
+                                .on_hover_text(&row.title);
+                            ui.label(RichText::new(&row.exe).weak().small());
                         });
                     }
                     if self.running.is_empty() {
                         ui.label(RichText::new("Scanning…").weak());
+                    } else if shown == 0 {
+                        ui.label(RichText::new("No window matches the filter.").weak());
                     }
                 }
                 for (exe, path, enabled) in changes {
-                    let mut cfg = self.cfg.lock().unwrap();
+                    let mut cfg = self.shared.cfg.lock().unwrap();
                     match cfg.rule_for_mut(&exe) {
                         Some(rule) => {
                             rule.enabled = enabled;
@@ -280,7 +342,7 @@ impl App {
                         }
                     }
                     drop(cfg);
-                    self.dirty = true;
+                    self.shared.mark_dirty();
                 }
             });
     }
@@ -289,7 +351,8 @@ impl App {
         ui.heading("Rules");
         let mut start_actions: Vec<(String, String)> = Vec::new();
         let mut shortcut_actions: Vec<(String, String)> = Vec::new();
-        let mut cfg = self.cfg.lock().unwrap();
+        let mut dirty = false;
+        let mut cfg = self.shared.cfg.lock().unwrap();
         if cfg.rules.is_empty() {
             ui.label(RichText::new("No rules yet — tick an application above.").weak());
         }
@@ -297,12 +360,15 @@ impl App {
         for (i, rule) in cfg.rules.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut rule.enabled, "").changed() {
-                    self.dirty = true;
+                    dirty = true;
                 }
                 ui.label(RichText::new(&rule.exe).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("🗑").on_hover_text("Remove rule").clicked() {
+                        remove = Some(i);
+                    }
                     if let Some(path) = rule.path.clone() {
-                        ui.menu_button("⋯", |ui| {
+                        ui.menu_button("…", |ui| {
                             if ui.button("▶ Start now").clicked() {
                                 start_actions.push((rule.exe.clone(), path.clone()));
                                 ui.close();
@@ -321,9 +387,6 @@ impl App {
                             ui.label(RichText::new(&path).weak().small());
                         });
                     }
-                    if ui.button("✕").on_hover_text("Remove rule").clicked() {
-                        remove = Some(i);
-                    }
                     let kill_secs = ui.add_enabled(
                         rule.force_kill,
                         egui::DragValue::new(&mut rule.force_kill_after_secs)
@@ -331,7 +394,7 @@ impl App {
                             .suffix(" s"),
                     );
                     if kill_secs.changed() {
-                        self.dirty = true;
+                        dirty = true;
                     }
                     if ui
                         .checkbox(&mut rule.force_kill, "force after")
@@ -341,7 +404,7 @@ impl App {
                         )
                         .changed()
                     {
-                        self.dirty = true;
+                        dirty = true;
                     }
                     if ui
                         .add(
@@ -351,7 +414,7 @@ impl App {
                         )
                         .changed()
                     {
-                        self.dirty = true;
+                        dirty = true;
                     }
                     ui.label("close after idle");
                 });
@@ -359,22 +422,28 @@ impl App {
         }
         if let Some(i) = remove {
             cfg.rules.remove(i);
-            self.dirty = true;
+            dirty = true;
         }
         drop(cfg);
+        if dirty {
+            self.shared.mark_dirty();
+        }
 
         for (exe, path) in start_actions {
             if launcher::start_target(std::path::Path::new(&path)) {
-                self.push_log(format!("Started {exe}"));
+                self.shared.push_log(format!("Started {exe}"));
             } else {
-                self.push_log(format!("Could not start {exe} ({path})"));
+                self.shared
+                    .push_log(format!("Could not start {exe} ({path})"));
             }
         }
         for (exe, path) in shortcut_actions {
             if launcher::create_companion_shortcut(std::path::Path::new(&path)) {
-                self.push_log(format!("Desktop shortcut created for {exe}"));
+                self.shared
+                    .push_log(format!("Desktop shortcut created for {exe}"));
             } else {
-                self.push_log(format!("Could not create a shortcut for {exe}"));
+                self.shared
+                    .push_log(format!("Could not create a shortcut for {exe}"));
             }
         }
 
@@ -394,10 +463,11 @@ impl App {
                 if !exe.contains('.') {
                     exe.push_str(".exe");
                 }
-                let mut cfg = self.cfg.lock().unwrap();
+                let mut cfg = self.shared.cfg.lock().unwrap();
                 if cfg.rule_for(&exe).is_none() {
                     cfg.rules.push(Rule { exe, ..Default::default() });
-                    self.dirty = true;
+                    drop(cfg);
+                    self.shared.mark_dirty();
                 }
                 self.add_rule_text.clear();
             }
@@ -407,94 +477,136 @@ impl App {
                 .clicked()
             {
                 if let Some(path) = win::pick_exe_file() {
-                    let mut cfg = self.cfg.lock().unwrap();
+                    let mut cfg = self.shared.cfg.lock().unwrap();
                     if let Some(exe) = cfg.bind_path(&path) {
                         drop(cfg);
-                        self.dirty = true;
-                        self.push_log(format!("Rule added for {exe}"));
+                        self.shared.mark_dirty();
+                        self.shared.push_log(format!("Rule added for {exe}"));
                     }
                 }
             }
         });
     }
 
-    fn section_global(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        let mut cfg = self.cfg.lock().unwrap();
-        ui.horizontal(|ui| {
-            ui.label("Warn before closing:");
-            if ui
-                .add(
-                    egui::DragValue::new(&mut cfg.warning_seconds)
-                        .range(5..=600)
-                        .suffix(" s"),
-                )
-                .changed()
-            {
-                self.dirty = true;
-            }
-        });
-        let mut paused = cfg.paused;
-        let pause_changed = ui.checkbox(&mut paused, "Pause monitoring").changed();
-        if pause_changed {
-            cfg.paused = paused;
-        }
-        drop(cfg);
-        if pause_changed {
-            self.tray.set_paused(paused);
-            self.dirty = true;
-        }
-
-        let mut installed = self.ctx_menu_installed;
-        if ui
-            .checkbox(
-                &mut installed,
-                "Explorer right-click menu: \"Run with auto-idle-close\"",
-            )
-            .on_hover_text(
-                "Adds an entry to the right-click menu of .exe files (on Windows 11 \
-                 it's under \"Show more options\"). Starting an app that way launches \
-                 it together with auto-idle-close and binds it automatically.\n\
-                 Note: the entry points at this exe's current location — re-toggle \
-                 after moving the exe.",
-            )
-            .changed()
-        {
-            let ok = if installed {
-                launcher::install_context_menu()
-            } else {
-                launcher::uninstall_context_menu()
-            };
-            if ok {
-                self.ctx_menu_installed = installed;
-                self.push_log(if installed {
-                    "Explorer right-click entry installed".into()
-                } else {
-                    "Explorer right-click entry removed".into()
-                });
-            } else {
-                self.push_log("Could not update the Explorer right-click entry".into());
-            }
-        }
-    }
-
-    fn section_log(&mut self, ui: &mut egui::Ui) {
-        if self.log.is_empty() {
+    /// The separate settings window, rendered as a deferred viewport so it
+    /// keeps working regardless of the main window's visibility.
+    fn settings_window(&self, ctx: &egui::Context) {
+        if !self.shared.settings_open.load(Ordering::Relaxed) {
             return;
         }
-        ui.heading("Recent activity");
-        for (when, message) in &self.log {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(ago(*when)).weak().small());
-                ui.label(RichText::new(message).small());
-            });
-        }
+        let shared = self.shared.clone();
+        ctx.show_viewport_deferred(
+            egui::ViewportId::from_hash_of("app-settings"),
+            egui::ViewportBuilder::default()
+                .with_title("Settings — Auto Idle Close")
+                .with_inner_size([440.0, 420.0])
+                .with_min_inner_size([380.0, 300.0]),
+            move |ui, _class| {
+                if ui.ctx().input(|i| i.viewport().close_requested()) {
+                    shared.settings_open.store(false, Ordering::Relaxed);
+                }
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.heading("General");
+                        {
+                            let mut cfg = shared.cfg.lock().unwrap();
+                            ui.horizontal(|ui| {
+                                ui.label("Warn before closing:");
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut cfg.warning_seconds)
+                                            .range(5..=600)
+                                            .suffix(" s"),
+                                    )
+                                    .changed()
+                                {
+                                    drop(cfg);
+                                    shared.mark_dirty();
+                                    return;
+                                }
+                            });
+                        }
+                        {
+                            let mut cfg = shared.cfg.lock().unwrap();
+                            let mut paused = cfg.paused;
+                            if ui.checkbox(&mut paused, "Pause monitoring").changed() {
+                                cfg.paused = paused;
+                                drop(cfg);
+                                shared.mark_dirty();
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        ui.heading("Integration");
+                        let mut installed =
+                            shared.ctx_menu_installed.load(Ordering::Relaxed);
+                        if ui
+                            .checkbox(
+                                &mut installed,
+                                "Explorer right-click menu: \"Run with auto-idle-close\"",
+                            )
+                            .on_hover_text(
+                                "Adds an entry to the right-click menu of .exe files (on \
+                                 Windows 11 it's under \"Show more options\"). Starting an \
+                                 app that way launches it together with auto-idle-close \
+                                 and binds it automatically.\nNote: the entry points at \
+                                 this exe's current location — re-toggle after moving it.",
+                            )
+                            .changed()
+                        {
+                            let ok = if installed {
+                                launcher::install_context_menu()
+                            } else {
+                                launcher::uninstall_context_menu()
+                            };
+                            if ok {
+                                shared.ctx_menu_installed.store(installed, Ordering::Relaxed);
+                                shared.push_log(if installed {
+                                    "Explorer right-click entry installed".into()
+                                } else {
+                                    "Explorer right-click entry removed".into()
+                                });
+                            } else {
+                                shared.push_log(
+                                    "Could not update the Explorer right-click entry".into(),
+                                );
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        let log_len = shared.log.lock().unwrap().len();
+                        egui::CollapsingHeader::new(format!("Recent activity ({log_len})"))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                let log = shared.log.lock().unwrap();
+                                if log.is_empty() {
+                                    ui.label(RichText::new("Nothing yet.").weak());
+                                }
+                                for (when, message) in log.iter() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(ago(*when)).weak().small());
+                                        ui.label(RichText::new(message).small());
+                                    });
+                                }
+                            });
+
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Config: {}",
+                                config::config_path().display()
+                            ))
+                            .weak()
+                            .small(),
+                        );
+                    });
+                });
+            },
+        );
     }
 
-    /// Shows the countdown popup as a *deferred* viewport: the backend renders
-    /// it as its own native window, independent of the (possibly hidden)
-    /// settings window. An immediate viewport panics here when the root is
-    /// hidden, because its callback is only serviced during a root paint.
+    /// Countdown popup as a deferred viewport (an immediate viewport would
+    /// panic while the main window is hidden to the tray).
     fn warning_popup(&mut self, ctx: &egui::Context) {
         let count = self.warnings.lock().unwrap().len();
         if count == 0 {
@@ -571,42 +683,61 @@ impl App {
 }
 
 impl eframe::App for App {
-    /// Runs every frame — including while the settings window is hidden in the
+    /// Runs every frame — including while the main window is hidden in the
     /// tray (as long as something calls `request_repaint`, which the monitor
     /// thread and tray handlers do). Everything that must keep working while
-    /// hidden lives here: channels, exit flow, and the warning popup.
+    /// hidden lives here: channels, exit flow, and the extra viewports.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_channels(ctx);
 
-        // Closing the settings window hides to tray instead of exiting.
+        // Closing the main window hides to tray instead of exiting.
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
-        self.warning_popup(ctx);
-
-        // Save after edits settle (not mid-drag).
-        if self.dirty && !ctx.input(|i| i.pointer.any_down()) {
-            self.save_if_dirty();
+        // Keep the tray checkmark in sync with pause edits from any window.
+        let paused = self.shared.cfg.lock().unwrap().paused;
+        if paused != self.last_paused {
+            self.last_paused = paused;
+            self.tray.set_paused(paused);
         }
+
+        self.warning_popup(ctx);
+        self.settings_window(ctx);
+        self.save_if_settled();
     }
 
-    /// Only runs while the settings window is visible.
+    /// Only runs while the main window is visible.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.refresh_running();
 
         egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Auto Idle Close");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("⚙ Settings").clicked() {
+                        let was_open =
+                            self.shared.settings_open.swap(true, Ordering::Relaxed);
+                        if was_open {
+                            ui.ctx().send_viewport_cmd_to(
+                                egui::ViewportId::from_hash_of("app-settings"),
+                                ViewportCommand::Focus,
+                            );
+                        }
+                    }
+                    if self.last_paused {
+                        ui.label(RichText::new("⏸ paused").weak());
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 self.section_running(ui);
                 ui.add_space(10.0);
                 ui.separator();
                 self.section_rules(ui);
-                ui.add_space(10.0);
-                ui.separator();
-                self.section_global(ui);
-                ui.add_space(10.0);
-                self.section_log(ui);
                 if let Some(err) = &self.save_error {
                     ui.add_space(8.0);
                     ui.colored_label(Color32::from_rgb(220, 60, 60), err);
