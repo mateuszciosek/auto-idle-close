@@ -3,6 +3,8 @@ use std::sync::mpsc::Sender;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+use crate::i18n::Strings;
+
 pub enum TrayMsg {
     OpenSettings,
     TogglePause,
@@ -12,16 +14,30 @@ pub enum TrayMsg {
 pub struct Tray {
     // Must stay alive for the whole app lifetime or the icon disappears.
     _icon: TrayIcon,
+    open_item: MenuItem,
     pause_item: CheckMenuItem,
+    exit_item: MenuItem,
 }
 
 impl Tray {
-    pub fn set_paused(&self, paused: bool) {
+    pub fn set_paused(&self, paused: bool, s: &Strings) {
         self.pause_item.set_checked(paused);
+        self.set_tooltip(paused, s);
+    }
+
+    /// Re-label the menu after a language change.
+    pub fn apply_language(&self, s: &Strings, paused: bool) {
+        self.open_item.set_text(s.tray_open);
+        self.pause_item.set_text(s.tray_pause);
+        self.exit_item.set_text(s.tray_exit);
+        self.set_tooltip(paused, s);
+    }
+
+    fn set_tooltip(&self, paused: bool, s: &Strings) {
         let _ = self._icon.set_tooltip(Some(if paused {
-            "auto-idle-close (paused)"
+            s.tray_tooltip_paused
         } else {
-            "auto-idle-close"
+            s.tray_tooltip
         }));
     }
 }
@@ -34,10 +50,11 @@ pub fn init(
     ctx: eframe::egui::Context,
     tx: Sender<TrayMsg>,
     paused: bool,
+    s: &Strings,
 ) -> tray_icon::Result<Tray> {
-    let open_item = MenuItem::new("Open settings", true, None);
-    let pause_item = CheckMenuItem::new("Pause monitoring", true, paused, None);
-    let exit_item = MenuItem::new("Exit", true, None);
+    let open_item = MenuItem::new(s.tray_open, true, None);
+    let pause_item = CheckMenuItem::new(s.tray_pause, true, paused, None);
+    let exit_item = MenuItem::new(s.tray_exit, true, None);
     let menu = Menu::new();
     menu.append_items(&[
         &open_item,
@@ -50,7 +67,7 @@ pub fn init(
     let (rgba, size) = icon_rgba(32);
     let icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("auto-idle-close")
+        .with_tooltip(if paused { s.tray_tooltip_paused } else { s.tray_tooltip })
         .with_icon(Icon::from_rgba(rgba, size, size).expect("valid icon rgba"))
         .build()?;
 
@@ -86,7 +103,12 @@ pub fn init(
         }
     }));
 
-    Ok(Tray { _icon: icon, pause_item })
+    Ok(Tray {
+        _icon: icon,
+        open_item,
+        pause_item,
+        exit_item,
+    })
 }
 
 /// Procedurally drawn clock icon (blue face, white 10:10 hands) so no image

@@ -107,13 +107,12 @@ pub fn context_menu_installed() -> bool {
     reg(&["query", VERB_KEY, "/ve"])
 }
 
-pub fn install_context_menu() -> bool {
+pub fn install_context_menu(display_name: &str) -> bool {
     let self_exe = std::env::current_exe().unwrap_or_default();
     let self_exe = self_exe.to_string_lossy();
     let command = format!("\"{self_exe}\" --launch \"%1\"");
-    reg(&[
-        "add", VERB_KEY, "/ve", "/d", "Run with auto-idle-close", "/f",
-    ]) && reg(&["add", VERB_KEY, "/v", "Icon", "/d", &self_exe, "/f"])
+    reg(&["add", VERB_KEY, "/ve", "/d", display_name, "/f"])
+        && reg(&["add", VERB_KEY, "/v", "Icon", "/d", &self_exe, "/f"])
         && reg(&[
             "add",
             &format!(r"{VERB_KEY}\command"),
@@ -220,7 +219,7 @@ mod tests {
     #[test]
     #[ignore]
     fn context_menu_roundtrip() {
-        assert!(install_context_menu(), "install failed");
+        assert!(install_context_menu("Run with auto-idle-close"), "install failed");
         assert!(context_menu_installed(), "not detected after install");
         assert!(uninstall_context_menu(), "uninstall failed");
         assert!(!context_menu_installed(), "still detected after uninstall");

@@ -205,6 +205,13 @@ pub fn my_pid() -> u32 {
     unsafe { GetCurrentProcessId() }
 }
 
+/// True when the Windows display language is Polish (for Language::Auto).
+pub fn system_language_is_polish() -> bool {
+    const LANG_POLISH: u16 = 0x15;
+    let langid = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+    (langid & 0x3FF) == LANG_POLISH
+}
+
 /// Returns false if another instance already holds the mutex.
 /// The handle is intentionally leaked for the process lifetime.
 pub fn acquire_single_instance() -> bool {

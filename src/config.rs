@@ -9,6 +9,8 @@ pub struct Config {
     pub warning_seconds: u32,
     pub poll_interval_ms: u64,
     pub paused: bool,
+    /// UI language; "auto" follows the Windows display language.
+    pub language: crate::i18n::Language,
     pub rules: Vec<Rule>,
 }
 
@@ -18,6 +20,7 @@ impl Default for Config {
             warning_seconds: 60,
             poll_interval_ms: 1000,
             paused: false,
+            language: crate::i18n::Language::Auto,
             rules: Vec::new(),
         }
     }
@@ -112,6 +115,7 @@ mod tests {
             warning_seconds: 30,
             poll_interval_ms: 500,
             paused: true,
+            language: crate::i18n::Language::Pl,
             rules: vec![Rule {
                 exe: "notepad.exe".into(),
                 enabled: true,

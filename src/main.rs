@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod i18n;
 mod launcher;
 mod monitor;
 mod tray;
@@ -67,8 +68,12 @@ fn main() -> eframe::Result {
                 monitor::run(monitor_cfg, cmd_rx, evt_tx, monitor_ctx, own_pid);
             });
 
-            let paused = cfg_for_app.lock().unwrap().paused;
-            let tray = tray::init(ctx, tray_tx, paused).expect("failed to create tray icon");
+            let (paused, lang) = {
+                let cfg = cfg_for_app.lock().unwrap();
+                (cfg.paused, cfg.language)
+            };
+            let tray = tray::init(ctx, tray_tx, paused, i18n::strings(lang))
+                .expect("failed to create tray icon");
 
             Ok(Box::new(ui::App::new(
                 cfg_for_app,

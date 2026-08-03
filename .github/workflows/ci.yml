@@ -98,11 +98,18 @@ jobs:
           echo "--- SHA256SUMS.txt ---"; cat SHA256SUMS.txt
           echo "--- manifests ---"; ls -l winget/
 
+      # Kept out of the visible release assets — grab them from the workflow
+      # run's artifacts when submitting to microsoft/winget-pkgs.
+      - name: Upload winget manifests as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests
+          path: winget/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             auto-idle-close.exe
             SHA256SUMS.txt
-            winget/*.yaml
           generate_release_notes: true
