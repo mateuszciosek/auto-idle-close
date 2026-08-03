@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod launcher;
 mod monitor;
 mod tray;
 mod ui;
@@ -12,11 +13,28 @@ use std::sync::{Arc, Mutex};
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // Wrapper mode: `--launch <exe>` (or a dropped .exe path) starts the
+    // target and makes sure a rule binds it.
+    let launch_target = launcher::launch_target_from_args();
+    if let Some(target) = &launch_target {
+        launcher::start_target(target);
+    }
+
     if !win::acquire_single_instance() {
+        // Another instance owns the tray; hand the bind request over.
+        if let Some(target) = &launch_target {
+            launcher::append_to_spool(target);
+        }
         return Ok(());
     }
 
-    let cfg = Arc::new(Mutex::new(config::load_or_default()));
+    let mut initial_cfg = config::load_or_default();
+    if let Some(target) = &launch_target {
+        if initial_cfg.bind_path(target).is_some() {
+            let _ = config::save(&initial_cfg);
+        }
+    }
+    let cfg = Arc::new(Mutex::new(initial_cfg));
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
     let (tray_tx, tray_rx) = mpsc::channel();

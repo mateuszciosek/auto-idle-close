@@ -32,6 +32,9 @@ pub struct Rule {
     pub timeout_minutes: u32,
     pub force_kill: bool,
     pub force_kill_after_secs: u32,
+    /// Full path of the executable when known (picked from disk, launched via
+    /// `--launch`, or seen running). Enables "Start" and companion shortcuts.
+    pub path: Option<String>,
 }
 
 impl Default for Rule {
@@ -42,6 +45,7 @@ impl Default for Rule {
             timeout_minutes: 30,
             force_kill: false,
             force_kill_after_secs: 30,
+            path: None,
         }
     }
 }
@@ -53,6 +57,24 @@ impl Config {
 
     pub fn rule_for_mut(&mut self, exe: &str) -> Option<&mut Rule> {
         self.rules.iter_mut().find(|r| r.exe.eq_ignore_ascii_case(exe))
+    }
+
+    /// Upsert a rule for an executable path: creates it if missing, enables it,
+    /// and remembers the full path. Returns the exe file name it bound.
+    pub fn bind_path(&mut self, path: &std::path::Path) -> Option<String> {
+        let exe = path.file_name()?.to_string_lossy().to_lowercase();
+        match self.rule_for_mut(&exe) {
+            Some(rule) => {
+                rule.enabled = true;
+                rule.path = Some(path.to_string_lossy().into_owned());
+            }
+            None => self.rules.push(Rule {
+                exe: exe.clone(),
+                path: Some(path.to_string_lossy().into_owned()),
+                ..Default::default()
+            }),
+        }
+        Some(exe)
     }
 }
 
@@ -96,6 +118,7 @@ mod tests {
                 timeout_minutes: 5,
                 force_kill: true,
                 force_kill_after_secs: 15,
+                path: Some(r"C:\Windows\notepad.exe".into()),
             }],
         };
         let text = toml::to_string(&cfg).unwrap();
@@ -124,6 +147,25 @@ mod tests {
     fn corrupt_file_falls_back() {
         let cfg: Config = toml::from_str("this is { not toml").unwrap_or_default();
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn bind_path_upserts_and_enables() {
+        let mut cfg = Config::default();
+        // Creates a new rule with the path remembered.
+        let exe = cfg.bind_path(std::path::Path::new(r"C:\Tools\MyApp.EXE"));
+        assert_eq!(exe.as_deref(), Some("myapp.exe"));
+        assert_eq!(cfg.rules.len(), 1);
+        assert!(cfg.rules[0].enabled);
+        assert_eq!(cfg.rules[0].path.as_deref(), Some(r"C:\Tools\MyApp.EXE"));
+
+        // Re-binding an existing (disabled) rule enables it and updates the path.
+        cfg.rules[0].enabled = false;
+        let exe = cfg.bind_path(std::path::Path::new(r"D:\Other\myapp.exe"));
+        assert_eq!(exe.as_deref(), Some("myapp.exe"));
+        assert_eq!(cfg.rules.len(), 1);
+        assert!(cfg.rules[0].enabled);
+        assert_eq!(cfg.rules[0].path.as_deref(), Some(r"D:\Other\myapp.exe"));
     }
 
     #[test]

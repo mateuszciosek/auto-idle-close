@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align, Color32, Layout, RichText, ViewportCommand};
 
 use crate::config::{self, Config, Rule};
+use crate::launcher;
 use crate::monitor::{MonitorCmd, MonitorEvent};
 use crate::tray::{Tray, TrayMsg};
 use crate::win;
@@ -21,6 +22,7 @@ struct ActiveWarning {
 
 struct AppRow {
     exe: String,
+    path: Option<String>,
     title: String,
     windows: usize,
     admin: bool,
@@ -39,9 +41,11 @@ pub struct App {
     shared_cmd_tx: Arc<Mutex<Sender<MonitorCmd>>>,
     log: VecDeque<(Instant, String)>,
     running: Vec<AppRow>,
-    exe_cache: HashMap<u32, Option<String>>,
+    /// pid -> (lowercase exe name, full path); None = unqueryable (elevated).
+    exe_cache: HashMap<u32, Option<(String, String)>>,
     last_refresh: Option<Instant>,
     add_rule_text: String,
+    ctx_menu_installed: bool,
     dirty: bool,
     save_error: Option<String>,
     allow_exit: bool,
@@ -68,6 +72,7 @@ impl App {
             exe_cache: HashMap::new(),
             last_refresh: None,
             add_rule_text: String::new(),
+            ctx_menu_installed: launcher::context_menu_installed(),
             dirty: false,
             save_error: None,
             allow_exit: false,
@@ -135,6 +140,10 @@ impl App {
                         "{exe} did not close (unsaved changes?) — timer restarted"
                     ));
                 }
+                MonitorEvent::LaunchBound { exe } => {
+                    drop(warnings);
+                    self.push_log(format!("{exe} started and bound for auto-close"));
+                }
             }
         }
     }
@@ -158,16 +167,25 @@ impl App {
             if w.pid == own {
                 continue;
             }
-            let exe = self
+            let info = self
                 .exe_cache
                 .entry(w.pid)
-                .or_insert_with(|| win::exe_name_for_pid(w.pid))
+                .or_insert_with(|| {
+                    win::exe_for_pid(w.pid).map(|p| {
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_lowercase())
+                            .unwrap_or_default();
+                        (name, p.to_string_lossy().into_owned())
+                    })
+                })
                 .clone();
             seen_pids.insert(w.pid, ());
-            match exe {
-                Some(exe) => {
+            match info {
+                Some((exe, path)) => {
                     let row = by_exe.entry(exe.clone()).or_insert_with(|| AppRow {
                         exe,
+                        path: Some(path),
                         title: w.title.clone(),
                         windows: 0,
                         admin: false,
@@ -176,6 +194,7 @@ impl App {
                 }
                 None => admin_rows.push(AppRow {
                     exe: String::new(),
+                    path: None,
                     title: w.title.clone(),
                     windows: 1,
                     admin: true,
@@ -215,7 +234,7 @@ impl App {
             .max_height(220.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                let mut changes: Vec<(String, bool)> = Vec::new();
+                let mut changes: Vec<(String, Option<String>, bool)> = Vec::new();
                 {
                     let cfg = self.cfg.lock().unwrap();
                     for row in &self.running {
@@ -231,7 +250,7 @@ impl App {
                             let mut checked =
                                 cfg.rule_for(&row.exe).is_some_and(|r| r.enabled);
                             if ui.checkbox(&mut checked, "").changed() {
-                                changes.push((row.exe.clone(), checked));
+                                changes.push((row.exe.clone(), row.path.clone(), checked));
                             }
                             ui.label(RichText::new(&row.exe).strong());
                             let mut title = truncate(&row.title, 40).to_string();
@@ -245,13 +264,18 @@ impl App {
                         ui.label(RichText::new("Scanning…").weak());
                     }
                 }
-                for (exe, enabled) in changes {
+                for (exe, path, enabled) in changes {
                     let mut cfg = self.cfg.lock().unwrap();
                     match cfg.rule_for_mut(&exe) {
-                        Some(rule) => rule.enabled = enabled,
+                        Some(rule) => {
+                            rule.enabled = enabled;
+                            if rule.path.is_none() {
+                                rule.path = path;
+                            }
+                        }
                         None => {
                             if enabled {
-                                cfg.rules.push(Rule { exe, ..Default::default() });
+                                cfg.rules.push(Rule { exe, path, ..Default::default() });
                             }
                         }
                     }
@@ -263,6 +287,8 @@ impl App {
 
     fn section_rules(&mut self, ui: &mut egui::Ui) {
         ui.heading("Rules");
+        let mut start_actions: Vec<(String, String)> = Vec::new();
+        let mut shortcut_actions: Vec<(String, String)> = Vec::new();
         let mut cfg = self.cfg.lock().unwrap();
         if cfg.rules.is_empty() {
             ui.label(RichText::new("No rules yet — tick an application above.").weak());
@@ -275,6 +301,26 @@ impl App {
                 }
                 ui.label(RichText::new(&rule.exe).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let Some(path) = rule.path.clone() {
+                        ui.menu_button("⋯", |ui| {
+                            if ui.button("▶ Start now").clicked() {
+                                start_actions.push((rule.exe.clone(), path.clone()));
+                                ui.close();
+                            }
+                            if ui
+                                .button("Create desktop shortcut")
+                                .on_hover_text(
+                                    "A \"(auto-close)\" shortcut that starts this app \
+                                     together with auto-idle-close, so it is always bound.",
+                                )
+                                .clicked()
+                            {
+                                shortcut_actions.push((rule.exe.clone(), path.clone()));
+                                ui.close();
+                            }
+                            ui.label(RichText::new(&path).weak().small());
+                        });
+                    }
                     if ui.button("✕").on_hover_text("Remove rule").clicked() {
                         remove = Some(i);
                     }
@@ -317,6 +363,21 @@ impl App {
         }
         drop(cfg);
 
+        for (exe, path) in start_actions {
+            if launcher::start_target(std::path::Path::new(&path)) {
+                self.push_log(format!("Started {exe}"));
+            } else {
+                self.push_log(format!("Could not start {exe} ({path})"));
+            }
+        }
+        for (exe, path) in shortcut_actions {
+            if launcher::create_companion_shortcut(std::path::Path::new(&path)) {
+                self.push_log(format!("Desktop shortcut created for {exe}"));
+            } else {
+                self.push_log(format!("Could not create a shortcut for {exe}"));
+            }
+        }
+
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label("Add by name:");
@@ -340,6 +401,20 @@ impl App {
                 }
                 self.add_rule_text.clear();
             }
+            if ui
+                .button("Browse…")
+                .on_hover_text("Pick an .exe from disk — you can then start it from here.")
+                .clicked()
+            {
+                if let Some(path) = win::pick_exe_file() {
+                    let mut cfg = self.cfg.lock().unwrap();
+                    if let Some(exe) = cfg.bind_path(&path) {
+                        drop(cfg);
+                        self.dirty = true;
+                        self.push_log(format!("Rule added for {exe}"));
+                    }
+                }
+            }
         });
     }
 
@@ -360,11 +435,46 @@ impl App {
             }
         });
         let mut paused = cfg.paused;
-        if ui.checkbox(&mut paused, "Pause monitoring").changed() {
+        let pause_changed = ui.checkbox(&mut paused, "Pause monitoring").changed();
+        if pause_changed {
             cfg.paused = paused;
-            drop(cfg);
+        }
+        drop(cfg);
+        if pause_changed {
             self.tray.set_paused(paused);
             self.dirty = true;
+        }
+
+        let mut installed = self.ctx_menu_installed;
+        if ui
+            .checkbox(
+                &mut installed,
+                "Explorer right-click menu: \"Run with auto-idle-close\"",
+            )
+            .on_hover_text(
+                "Adds an entry to the right-click menu of .exe files (on Windows 11 \
+                 it's under \"Show more options\"). Starting an app that way launches \
+                 it together with auto-idle-close and binds it automatically.\n\
+                 Note: the entry points at this exe's current location — re-toggle \
+                 after moving the exe.",
+            )
+            .changed()
+        {
+            let ok = if installed {
+                launcher::install_context_menu()
+            } else {
+                launcher::uninstall_context_menu()
+            };
+            if ok {
+                self.ctx_menu_installed = installed;
+                self.push_log(if installed {
+                    "Explorer right-click entry installed".into()
+                } else {
+                    "Explorer right-click entry removed".into()
+                });
+            } else {
+                self.push_log("Could not update the Explorer right-click entry".into());
+            }
         }
     }
 

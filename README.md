@@ -27,11 +27,34 @@ rule, in which case it is terminated after the configured grace period.
 
 1. Run `auto-idle-close.exe`. The settings window lists running applications —
    tick the ones to manage, tune the timeout per rule.
-2. Apps that aren't running yet can be added by exe name (*Add by name*).
+2. Apps that aren't running yet can be added by exe name (*Add by name*) or
+   picked from disk (*Browse…*). Rules with a known path get a `⋯` menu with
+   **Start now** and **Create desktop shortcut**.
 3. Closing the window hides it to the tray; left-click the tray clock icon to
    reopen, right-click for Pause / Exit.
 4. Settings save automatically to `config.toml` beside the exe (keep the exe in
    a writable folder).
+
+### Running apps *through* auto-idle-close
+
+To guarantee an app is always monitored — even on a fresh boot when the tray
+app isn't running yet — start it through the wrapper:
+
+```
+auto-idle-close.exe --launch "C:\path\to\app.exe"
+```
+
+This starts the app, starts auto-idle-close if needed (or hands the request to
+the running instance), and adds/enables a rule for it automatically. Dropping
+an .exe onto `auto-idle-close.exe` does the same. Three convenient frontends:
+
+- **Explorer right-click**: enable *"Run with auto-idle-close"* in Settings to
+  get a context-menu entry on every .exe (Windows 11: under *Show more
+  options*). Re-toggle it if you move `auto-idle-close.exe`.
+- **Companion shortcuts**: the `⋯` menu on a rule creates an
+  *"App (auto-close)"* desktop shortcut that launches the app via the wrapper.
+- **Autostart pairing**: point any existing shortcut/startup entry at the
+  wrapper command above instead of the app itself.
 
 ```toml
 # config.toml
@@ -43,6 +66,7 @@ enabled = true
 timeout_minutes = 30        # idle time before closing
 force_kill = false          # terminate if WM_CLOSE is ignored?
 force_kill_after_secs = 30
+path = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # optional; enables Start/shortcuts
 ```
 
 Elevated (admin) processes cannot be managed from a non-elevated instance and
@@ -69,6 +93,7 @@ Debug builds keep a console window and log panics; release builds are windowed.
 | `src/config.rs` | TOML config schema, load/save |
 | `src/ui.rs` | settings window, warning popup (deferred viewport), hide-to-tray |
 | `src/tray.rs` | tray icon, menu, procedurally drawn clock icon |
+| `src/launcher.rs` | `--launch` wrapper mode, spool handoff, Explorer context menu, shortcuts |
 
 Ideas for extending: scheduled close times, CPU-busy guard before closing,
 start-with-Windows toggle, per-rule warning length, event-hook based foreground

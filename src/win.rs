@@ -12,6 +12,9 @@ use windows::Win32::System::Threading::{
     TerminateProcess,
 };
 use windows::Win32::System::SystemInformation::GetTickCount;
+use windows::Win32::UI::Controls::Dialogs::{
+    GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
@@ -157,6 +160,30 @@ pub fn terminate(pid: u32) -> bool {
             Err(_) => false,
         }
     }
+}
+
+/// Native "open file" dialog filtered to executables. Blocks until dismissed.
+pub fn pick_exe_file() -> Option<std::path::PathBuf> {
+    // Filter format: pairs of display\0pattern\0, double-\0 terminated.
+    let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let mut file_buf = [0u16; 1024];
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: windows::core::PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(file_buf.as_mut_ptr()),
+        nMaxFile: file_buf.len() as u32,
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        ..Default::default()
+    };
+    unsafe {
+        if !GetOpenFileNameW(&mut ofn).as_bool() {
+            return None;
+        }
+    }
+    let len = file_buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (len > 0).then(|| std::path::PathBuf::from(String::from_utf16_lossy(&file_buf[..len])))
 }
 
 /// Milliseconds since the last keyboard/mouse input anywhere in the session.

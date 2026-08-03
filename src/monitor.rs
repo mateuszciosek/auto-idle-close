@@ -25,6 +25,8 @@ pub enum MonitorEvent {
     WarningCancelled { pid: u32 },
     Closed { pid: u32, exe: String, forced: bool },
     CloseFailed { pid: u32, exe: String },
+    /// An app was bound (rule added/enabled) via the `--launch` wrapper.
+    LaunchBound { exe: String },
 }
 
 /// Everything the engine needs to know about the outside world for one tick.
@@ -296,6 +298,29 @@ pub fn run(
                 execute(actions);
             }
             Err(RecvTimeoutError::Timeout) => {
+                // Bind requests handed over by a `--launch` wrapper instance.
+                let spooled = crate::launcher::drain_spool();
+                if !spooled.is_empty() {
+                    let mut config = cfg.lock().unwrap();
+                    let mut bound = Vec::new();
+                    for path in spooled {
+                        if let Some(exe) = config.bind_path(&path) {
+                            bound.push(exe);
+                        }
+                    }
+                    let snapshot = config.clone();
+                    drop(config);
+                    let _ = crate::config::save(&snapshot);
+                    forward(
+                        &tx,
+                        &ctx,
+                        bound
+                            .into_iter()
+                            .map(|exe| MonitorEvent::LaunchBound { exe })
+                            .collect(),
+                    );
+                }
+
                 let config = cfg.lock().unwrap().clone();
                 let snap = build_snapshot(&engine, own_pid);
                 let mut events = Vec::new();

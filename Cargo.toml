@@ -1,6 +1,6 @@
 [package]
 name = "auto-idle-close"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Portable Windows tray utility that gracefully closes idle applications"
 
@@ -9,7 +9,7 @@ eframe = { version = "0.35.0", default-features = false, features = ["glow", "de
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
 tray-icon = "0.24.2"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Graphics_Dwm", "Win32_Security", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Graphics_Dwm", "Win32_Security", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Win32_UI_Controls_Dialogs"] }
 
 [build-dependencies]
 winresource = "0.1.31"
