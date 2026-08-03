@@ -45,6 +45,7 @@ struct Shared {
     /// Time of the last unsaved edit (drives the debounced save).
     dirty_since: Mutex<Option<Instant>>,
     ctx_menu_installed: AtomicBool,
+    autostart_enabled: AtomicBool,
     settings_open: AtomicBool,
 }
 
@@ -101,6 +102,7 @@ impl App {
                 log: Mutex::new(VecDeque::new()),
                 dirty_since: Mutex::new(None),
                 ctx_menu_installed: AtomicBool::new(launcher::context_menu_installed()),
+                autostart_enabled: AtomicBool::new(launcher::autostart_enabled()),
                 settings_open: AtomicBool::new(false),
             }),
             shared_cmd_tx: Arc::new(Mutex::new(cmd_tx.clone())),
@@ -556,6 +558,31 @@ impl App {
 
                         ui.add_space(8.0);
                         ui.heading(s.sec_integration);
+                        let mut autostart = shared.autostart_enabled.load(Ordering::Relaxed);
+                        if ui
+                            .checkbox(&mut autostart, s.autostart_checkbox)
+                            .on_hover_text(s.autostart_hint)
+                            .changed()
+                        {
+                            let ok = if autostart {
+                                launcher::enable_autostart()
+                            } else {
+                                launcher::disable_autostart()
+                            };
+                            if ok {
+                                shared.autostart_enabled.store(autostart, Ordering::Relaxed);
+                                shared.push_log(
+                                    if autostart {
+                                        s.log_autostart_on
+                                    } else {
+                                        s.log_autostart_off
+                                    }
+                                    .to_string(),
+                                );
+                            } else {
+                                shared.push_log(s.log_autostart_failed.to_string());
+                            }
+                        }
                         let mut installed =
                             shared.ctx_menu_installed.load(Ordering::Relaxed);
                         if ui

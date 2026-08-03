@@ -128,6 +128,35 @@ pub fn uninstall_context_menu() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Start with Windows (HKCU Run key — per-user, no admin needed)
+// ---------------------------------------------------------------------------
+
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "auto-idle-close";
+
+pub fn autostart_enabled() -> bool {
+    reg(&["query", RUN_KEY, "/v", RUN_VALUE])
+}
+
+/// Registers the current exe to start at login, hidden in the tray.
+pub fn enable_autostart() -> bool {
+    let self_exe = std::env::current_exe().unwrap_or_default();
+    let command = format!("\"{}\" --tray", self_exe.to_string_lossy());
+    reg(&[
+        "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f",
+    ])
+}
+
+pub fn disable_autostart() -> bool {
+    reg(&["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])
+}
+
+/// True when started with `--tray` (autostart): begin hidden in the tray.
+pub fn start_in_tray() -> bool {
+    std::env::args().any(|a| a == "--tray")
+}
+
+// ---------------------------------------------------------------------------
 // Companion desktop shortcuts ("MyApp (auto-close).lnk")
 // ---------------------------------------------------------------------------
 
@@ -213,6 +242,20 @@ mod tests {
             .output()
             .unwrap();
         assert!(check.status.success(), "shortcut not found on desktop");
+    }
+
+    /// Mutates HKCU — run explicitly with: cargo test -- --ignored
+    #[test]
+    #[ignore]
+    fn autostart_roundtrip() {
+        let was_enabled = autostart_enabled();
+        assert!(enable_autostart(), "enable failed");
+        assert!(autostart_enabled(), "not detected after enable");
+        assert!(disable_autostart(), "disable failed");
+        assert!(!autostart_enabled(), "still detected after disable");
+        if was_enabled {
+            enable_autostart(); // restore the user's setting
+        }
     }
 
     /// Mutates HKCU — run explicitly with: cargo test -- --ignored

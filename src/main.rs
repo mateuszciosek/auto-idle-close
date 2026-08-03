@@ -46,6 +46,8 @@ fn main() -> eframe::Result {
             .with_title("Auto Idle Close")
             .with_inner_size([560.0, 620.0])
             .with_min_inner_size([460.0, 400.0])
+            // Autostart (--tray) begins hidden; the tray icon is the way in.
+            .with_visible(!launcher::start_in_tray())
             .with_icon(egui::IconData {
                 rgba: icon_rgba,
                 width: icon_size,

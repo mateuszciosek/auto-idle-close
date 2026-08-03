@@ -32,8 +32,10 @@ rule, in which case it is terminated after the configured grace period.
    picked from disk (*Browse…*). Rules with a known path get a `…` menu with
    **Start now** and **Create desktop shortcut**.
 3. The **⚙ Settings** button opens a separate window with global options
-   (warning length, pause, Explorer integration) and a collapsible *Recent
-   activity* list.
+   (warning length, pause, language, start-with-Windows, Explorer integration)
+   and a collapsible *Recent activity* list. *Start with Windows* registers a
+   per-user Run entry that launches the app at login hidden in the tray
+   (equivalent to running it with `--tray`).
 4. Closing the window hides it to the tray; left-click the tray clock icon to
    reopen, right-click for Pause / Exit.
 5. Settings save automatically to `config.toml` beside the exe (keep the exe in

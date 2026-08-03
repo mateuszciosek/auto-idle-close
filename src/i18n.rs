@@ -48,6 +48,11 @@ pub struct Strings {
     pub language_label: &'static str,
     pub lang_auto: &'static str,
     pub sec_integration: &'static str,
+    pub autostart_checkbox: &'static str,
+    pub autostart_hint: &'static str,
+    pub log_autostart_on: &'static str,
+    pub log_autostart_off: &'static str,
+    pub log_autostart_failed: &'static str,
     pub explorer_checkbox: &'static str,
     pub explorer_hint: &'static str,
     pub recent_activity: &'static str,
@@ -119,6 +124,13 @@ pub static EN: Strings = Strings {
     language_label: "Language:",
     lang_auto: "Auto (system)",
     sec_integration: "Integration",
+    autostart_checkbox: "Start with Windows (hidden in the tray)",
+    autostart_hint: "Runs auto-idle-close automatically at login (per-user registry \
+                     Run entry, no admin rights). It points at this exe's current \
+                     location — re-toggle after moving the file.",
+    log_autostart_on: "Autostart at login enabled",
+    log_autostart_off: "Autostart at login disabled",
+    log_autostart_failed: "Could not change the autostart entry",
     explorer_checkbox: "Explorer right-click menu: \"Run with auto-idle-close\"",
     explorer_hint: "Adds an entry to the right-click menu of .exe files (on Windows 11 \
                     it's under \"Show more options\"). Starting an app that way launches \
@@ -189,6 +201,14 @@ pub static PL: Strings = Strings {
     language_label: "Język:",
     lang_auto: "Automatycznie (system)",
     sec_integration: "Integracja",
+    autostart_checkbox: "Uruchamiaj przy starcie systemu (ukryty w zasobniku)",
+    autostart_hint: "Uruchamia auto-idle-close automatycznie po zalogowaniu (wpis Run \
+                     w rejestrze użytkownika, bez uprawnień administratora). Wpis \
+                     wskazuje obecną lokalizację exe — po przeniesieniu pliku przełącz \
+                     opcję ponownie.",
+    log_autostart_on: "Włączono autostart przy logowaniu",
+    log_autostart_off: "Wyłączono autostart przy logowaniu",
+    log_autostart_failed: "Nie udało się zmienić wpisu autostartu",
     explorer_checkbox: "Menu prawego przycisku Eksploratora: „Uruchom z auto-idle-close”",
     explorer_hint: "Dodaje pozycję do menu prawego przycisku plików .exe (w Windows 11 \
                     pod „Pokaż więcej opcji”). Uruchomienie aplikacji w ten sposób \
