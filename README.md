@@ -76,6 +76,29 @@ path = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # optional; enab
 Elevated (admin) processes cannot be managed from a non-elevated instance and
 are shown grayed out.
 
+## Downloads, SmartScreen, and verifying releases
+
+Releases are unsigned (no paid code-signing certificate), so on first run of a
+downloaded exe Windows SmartScreen may show *"Windows protected your PC"* —
+this is a reputation check, not a malware detection. Click **More info → Run
+anyway**. The warning fades on its own as a release accumulates downloads.
+
+To verify a download, every release ships a `SHA256SUMS.txt`. In PowerShell:
+
+```powershell
+(Get-FileHash .\auto-idle-close.exe -Algorithm SHA256).Hash
+# compare with the value in SHA256SUMS.txt
+```
+
+Each release also attaches ready-made **winget manifests**
+(`MateuszCiosek.AutoIdleClose.*.yaml`) with the correct hash filled in, for
+submission to [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs)
+— installing via winget avoids the SmartScreen download prompt entirely.
+
+Longer term, [SignPath Foundation](https://signpath.org/) offers free code
+signing to qualifying open-source projects, which gives releases a persistent
+publisher reputation.
+
 ## Building
 
 Requires Rust (stable) and the MSVC build tools.

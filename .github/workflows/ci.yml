@@ -44,8 +44,65 @@ jobs:
         with:
           name: auto-idle-close
 
+      - name: Generate checksums and winget manifests
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sha256sum auto-idle-close.exe > SHA256SUMS.txt
+          SHA=$(cut -d' ' -f1 SHA256SUMS.txt)
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          mkdir -p winget
+
+          cat > winget/MateuszCiosek.AutoIdleClose.yaml <<EOF
+          PackageIdentifier: MateuszCiosek.AutoIdleClose
+          PackageVersion: ${VERSION}
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          EOF
+
+          cat > winget/MateuszCiosek.AutoIdleClose.installer.yaml <<EOF
+          PackageIdentifier: MateuszCiosek.AutoIdleClose
+          PackageVersion: ${VERSION}
+          MinimumOSVersion: 10.0.0.0
+          InstallerType: portable
+          Commands:
+          - auto-idle-close
+          Installers:
+          - Architecture: x64
+            InstallerUrl: ${BASE}/auto-idle-close.exe
+            InstallerSha256: ${SHA}
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          EOF
+
+          cat > winget/MateuszCiosek.AutoIdleClose.locale.en-US.yaml <<EOF
+          PackageIdentifier: MateuszCiosek.AutoIdleClose
+          PackageVersion: ${VERSION}
+          PackageLocale: en-US
+          Publisher: Mateusz Ciosek
+          PublisherUrl: https://github.com/mateuszciosek
+          PackageName: Auto Idle Close
+          PackageUrl: https://github.com/${GITHUB_REPOSITORY}
+          License: MIT
+          LicenseUrl: https://github.com/${GITHUB_REPOSITORY}/blob/master/LICENSE
+          ShortDescription: Portable Windows tray utility that gracefully closes idle applications
+          Tags:
+          - idle
+          - tray
+          - utility
+          - auto-close
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          EOF
+
+          echo "--- SHA256SUMS.txt ---"; cat SHA256SUMS.txt
+          echo "--- manifests ---"; ls -l winget/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: auto-idle-close.exe
+          files: |
+            auto-idle-close.exe
+            SHA256SUMS.txt
+            winget/*.yaml
           generate_release_notes: true

@@ -1,8 +1,10 @@
 [package]
 name = "auto-idle-close"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Portable Windows tray utility that gracefully closes idle applications"
+license = "MIT"
+repository = "https://github.com/mateuszciosek/auto-idle-close"
 
 [dependencies]
 eframe = { version = "0.35.0", default-features = false, features = ["glow", "default_fonts"] }
