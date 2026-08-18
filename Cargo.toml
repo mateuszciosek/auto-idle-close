@@ -1,6 +1,6 @@
 [package]
 name = "auto-idle-close"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Portable Windows tray utility that gracefully closes idle applications"
 license = "MIT"

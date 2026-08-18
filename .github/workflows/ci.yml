@@ -31,6 +31,20 @@ jobs:
           path: target/release/auto-idle-close.exe
           if-no-files-found: error
 
+      # Inno Setup 6 is preinstalled on windows-latest runners (iscc on PATH).
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          iscc /DAppVersion=$version installer\auto-idle-close.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-idle-close-setup
+          path: target/installer/auto-idle-close-setup.exe
+          if-no-files-found: error
+
   release:
     # Runs only when a version tag (v0.1.0, v1.2.3, ...) is pushed.
     if: startsWith(github.ref, 'refs/tags/v')
@@ -44,11 +58,16 @@ jobs:
         with:
           name: auto-idle-close
 
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: auto-idle-close-setup
+
       - name: Generate checksums and winget manifests
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          sha256sum auto-idle-close.exe > SHA256SUMS.txt
-          SHA=$(cut -d' ' -f1 SHA256SUMS.txt)
+          sha256sum auto-idle-close.exe auto-idle-close-setup.exe > SHA256SUMS.txt
+          SHA=$(sha256sum auto-idle-close.exe | cut -d' ' -f1)
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
           mkdir -p winget
 
@@ -111,5 +130,6 @@ jobs:
         with:
           files: |
             auto-idle-close.exe
+            auto-idle-close-setup.exe
             SHA256SUMS.txt
           generate_release_notes: true

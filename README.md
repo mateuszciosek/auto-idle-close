@@ -3,8 +3,11 @@
 A tiny, portable Windows tray utility that gracefully closes applications you
 left idle — pick the apps, set a timeout per app, and it takes care of the rest.
 
-- **Portable**: one ~5.5 MB `auto-idle-close.exe`, no installer, no runtime,
-  nothing else to ship. Settings live in `config.toml` next to the exe.
+- **Portable**: one ~5.5 MB `auto-idle-close.exe`, no runtime, nothing else to
+  ship. Settings live in `config.toml` next to the exe. Prefer an installer?
+  Each release also has `auto-idle-close-setup.exe` (per-user, no admin
+  rights, Start menu shortcut, optional desktop icon and autostart, clean
+  uninstall).
 - **Graceful by default**: apps are closed the same way as clicking their ✕
   button (`WM_CLOSE`), never killed — unless you opt in per app.
 - **Warned before it acts**: an always-on-top countdown popup appears before
@@ -79,6 +82,15 @@ Elevated (admin) processes cannot be managed from a non-elevated instance and
 are shown grayed out.
 
 ## Downloads, SmartScreen, and verifying releases
+
+Two flavours per release, both containing the same exe:
+
+- `auto-idle-close.exe` — portable; drop it anywhere, config stays next to it.
+- `auto-idle-close-setup.exe` — installer; installs per-user to
+  `%LOCALAPPDATA%\Programs\auto-idle-close` (no admin prompt), adds a Start
+  menu shortcut, offers optional desktop icon and start-with-Windows during
+  setup, and its uninstaller removes the app plus any registry entries the app
+  created (autostart, Explorer context-menu verb) and its config.
 
 Releases are unsigned (no paid code-signing certificate), so on first run of a
 downloaded exe Windows SmartScreen may show *"Windows protected your PC"* —
