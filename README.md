@@ -13,6 +13,11 @@ left idle — pick the apps, set a timeout per app, and it takes care of the res
 - **Warned before it acts**: an always-on-top countdown popup appears before
   closing, with *Keep open* / *Close now* buttons.
 - **Light**: 0% CPU while idle (1 s polling), single background thread.
+- **Self-updating (opt-out)**: once a day the app asks github.com for the
+  latest release tag and shows a banner when a newer version exists. Nothing
+  is downloaded or installed without a click; the update is fetched from the
+  GitHub release, verified against its `SHA256SUMS.txt`, swapped in place,
+  and the app restarts. Disable in Settings → Updates.
 - **Remote desktop friendly**: inside an RDP session the app automatically
   switches from OpenGL to a DirectX 12 (wgpu) renderer, since RDP exposes
   only OpenGL 1.1. Force a renderer with `--renderer glow` or

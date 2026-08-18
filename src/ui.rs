@@ -11,6 +11,7 @@ use crate::i18n::{self, Language, Strings, fmt};
 use crate::launcher;
 use crate::monitor::{MonitorCmd, MonitorEvent};
 use crate::tray::{Tray, TrayMsg};
+use crate::update;
 use crate::win;
 
 const RUNNING_REFRESH: Duration = Duration::from_secs(2);
@@ -47,6 +48,7 @@ struct Shared {
     ctx_menu_installed: AtomicBool,
     autostart_enabled: AtomicBool,
     settings_open: AtomicBool,
+    update: Arc<update::UpdateState>,
 }
 
 impl Shared {
@@ -104,6 +106,7 @@ impl App {
                 ctx_menu_installed: AtomicBool::new(launcher::context_menu_installed()),
                 autostart_enabled: AtomicBool::new(launcher::autostart_enabled()),
                 settings_open: AtomicBool::new(false),
+                update: Arc::new(update::UpdateState::default()),
             }),
             shared_cmd_tx: Arc::new(Mutex::new(cmd_tx.clone())),
             cmd_tx,
@@ -611,6 +614,55 @@ impl App {
                         }
 
                         ui.add_space(8.0);
+                        ui.heading(s.sec_updates);
+                        {
+                            let mut cfg = shared.cfg.lock().unwrap();
+                            let mut auto_check = cfg.check_updates;
+                            if ui
+                                .checkbox(&mut auto_check, s.updates_checkbox)
+                                .on_hover_text(s.updates_hint)
+                                .changed()
+                            {
+                                cfg.check_updates = auto_check;
+                                drop(cfg);
+                                shared.mark_dirty();
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button(s.upd_check_now).clicked() {
+                                update::spawn_check(
+                                    shared.update.clone(),
+                                    ui.ctx().clone(),
+                                    false,
+                                );
+                            }
+                            let status = shared.update.status();
+                            let text = match &status {
+                                update::Status::Idle => String::new(),
+                                update::Status::Checking => s.upd_checking.to_string(),
+                                update::Status::UpToDate => s.upd_uptodate.to_string(),
+                                update::Status::Available(tag) => {
+                                    fmt(s.upd_available_fmt, tag)
+                                }
+                                update::Status::Downloading => s.upd_downloading.to_string(),
+                                update::Status::Restarting => s.upd_restarting.to_string(),
+                                update::Status::Failed(e) => fmt(s.upd_failed_fmt, e),
+                            };
+                            if !text.is_empty() {
+                                ui.label(RichText::new(text).weak());
+                            }
+                            if let update::Status::Available(tag) = status {
+                                if ui.button(s.upd_install).clicked() {
+                                    update::spawn_install(
+                                        shared.update.clone(),
+                                        ui.ctx().clone(),
+                                        tag,
+                                    );
+                                }
+                            }
+                        });
+
+                        ui.add_space(8.0);
                         let log_len = shared.log.lock().unwrap().len();
                         egui::CollapsingHeader::new(format!(
                             "{} ({log_len})",
@@ -729,6 +781,31 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_channels(ctx);
 
+        // A verified update is staged in place of our exe: exit normally;
+        // the detached waiter starts the new version once we are gone.
+        if self.shared.update.restart_ready.swap(false, Ordering::SeqCst) {
+            self.allow_exit = true;
+            let _ = self.cmd_tx.send(MonitorCmd::Shutdown);
+            self.save_now();
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+
+        // Daily background version check (works while hidden in the tray;
+        // the monitor thread's repaints keep this loop running).
+        if self.shared.cfg.lock().unwrap().check_updates {
+            let due = self
+                .shared
+                .update
+                .next_check
+                .lock()
+                .unwrap()
+                .is_none_or(|t| Instant::now() >= t);
+            if due {
+                update::spawn_check(self.shared.update.clone(), ctx.clone(), true);
+            }
+        }
+
         // Closing the main window hides to tray instead of exiting.
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -779,6 +856,34 @@ impl eframe::App for App {
                 });
             });
             ui.add_space(4.0);
+
+            match self.shared.update.status() {
+                update::Status::Available(tag) => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(fmt(s.upd_available_fmt, &tag)).strong());
+                        if ui.button(s.upd_install).clicked() {
+                            update::spawn_install(
+                                self.shared.update.clone(),
+                                ui.ctx().clone(),
+                                tag.clone(),
+                            );
+                        }
+                        if ui.button(s.upd_notes).clicked() {
+                            update::open_release_page();
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                update::Status::Downloading => {
+                    ui.label(RichText::new(s.upd_downloading).weak());
+                    ui.add_space(4.0);
+                }
+                update::Status::Restarting => {
+                    ui.label(RichText::new(s.upd_restarting).weak());
+                    ui.add_space(4.0);
+                }
+                _ => {}
+            }
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 self.section_running(ui, s);

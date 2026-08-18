@@ -11,6 +11,9 @@ pub struct Config {
     pub paused: bool,
     /// UI language; "auto" follows the Windows display language.
     pub language: crate::i18n::Language,
+    /// Daily background check for a newer GitHub release (check only —
+    /// installing always takes an explicit click).
+    pub check_updates: bool,
     pub rules: Vec<Rule>,
 }
 
@@ -21,6 +24,7 @@ impl Default for Config {
             poll_interval_ms: 1000,
             paused: false,
             language: crate::i18n::Language::Auto,
+            check_updates: true,
             rules: Vec::new(),
         }
     }
@@ -116,6 +120,7 @@ mod tests {
             poll_interval_ms: 500,
             paused: true,
             language: crate::i18n::Language::Pl,
+            check_updates: false,
             rules: vec![Rule {
                 exe: "notepad.exe".into(),
                 enabled: true,

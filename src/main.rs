@@ -6,6 +6,7 @@ mod launcher;
 mod monitor;
 mod tray;
 mod ui;
+mod update;
 mod win;
 
 use std::sync::mpsc;
@@ -40,6 +41,9 @@ fn main() -> eframe::Result {
     if let Some(target) = &launch_target {
         launcher::start_target(target);
     }
+
+    // Tidy up the staging files a previous self-update left behind.
+    update::cleanup_leftovers();
 
     if !win::acquire_single_instance() {
         // Another instance owns the tray; hand the bind request over.
