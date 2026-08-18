@@ -3,7 +3,7 @@
 A tiny, portable Windows tray utility that gracefully closes applications you
 left idle — pick the apps, set a timeout per app, and it takes care of the rest.
 
-- **Portable**: one ~5.5 MB `auto-idle-close.exe`, no runtime, nothing else to
+- **Portable**: one ~8 MB `auto-idle-close.exe`, no runtime, nothing else to
   ship. Settings live in `config.toml` next to the exe. Prefer an installer?
   Each release also has `auto-idle-close-setup.exe` (per-user, no admin
   rights, Start menu shortcut, optional desktop icon and autostart, clean
@@ -13,6 +13,10 @@ left idle — pick the apps, set a timeout per app, and it takes care of the res
 - **Warned before it acts**: an always-on-top countdown popup appears before
   closing, with *Keep open* / *Close now* buttons.
 - **Light**: 0% CPU while idle (1 s polling), single background thread.
+- **Remote desktop friendly**: inside an RDP session the app automatically
+  switches from OpenGL to a DirectX 12 (wgpu) renderer, since RDP exposes
+  only OpenGL 1.1. Force a renderer with `--renderer glow` or
+  `--renderer wgpu` if needed.
 
 ## How it works
 

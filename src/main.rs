@@ -13,6 +13,26 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+/// Glow (OpenGL) everywhere it works — smaller working set. RDP sessions
+/// expose only OpenGL 1.1 (no GPU ICD), where context creation fails and,
+/// with panic="abort", the app used to die silently; there we use wgpu,
+/// whose DirectX 12 backend is properly virtualized over RDP (WARP software
+/// fallback included). `--renderer glow|wgpu` overrides for troubleshooting.
+fn pick_renderer() -> eframe::Renderer {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args
+        .iter()
+        .position(|a| a == "--renderer")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+    {
+        Some("wgpu") => eframe::Renderer::Wgpu,
+        Some("glow") => eframe::Renderer::Glow,
+        _ if win::is_remote_session() => eframe::Renderer::Wgpu,
+        _ => eframe::Renderer::Glow,
+    }
+}
+
 fn main() -> eframe::Result {
     // Wrapper mode: `--launch <exe>` (or a dropped .exe path) starts the
     // target and makes sure a rule binds it.
@@ -42,6 +62,7 @@ fn main() -> eframe::Result {
 
     let (icon_rgba, icon_size) = tray::icon_rgba(64);
     let native_options = eframe::NativeOptions {
+        renderer: pick_renderer(),
         viewport: egui::ViewportBuilder::default()
             .with_title("Auto Idle Close")
             .with_inner_size([560.0, 620.0])

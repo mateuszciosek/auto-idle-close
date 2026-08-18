@@ -17,9 +17,9 @@ use windows::Win32::UI::Controls::Dialogs::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
-    WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
+    SM_REMOTESESSION, WM_CLOSE, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, PWSTR, w};
 
@@ -85,6 +85,12 @@ pub fn enum_top_windows() -> Vec<TopWindow> {
         );
     }
     windows
+}
+
+/// True when this process runs inside a remote (RDP) session, where WGL
+/// exposes only OpenGL 1.1 and the glow backend cannot start.
+pub fn is_remote_session() -> bool {
+    unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
 }
 
 /// Full image path of a process. `None` for processes we cannot query
