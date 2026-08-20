@@ -25,6 +25,12 @@ impl Tray {
         self.set_tooltip(paused, s);
     }
 
+    /// Grey out the items an admin policy forbids.
+    pub fn apply_policy(&self, allow_pause: bool, allow_exit: bool) {
+        self.pause_item.set_enabled(allow_pause);
+        self.exit_item.set_enabled(allow_exit);
+    }
+
     /// Re-label the menu after a language change.
     pub fn apply_language(&self, s: &Strings, paused: bool) {
         self.open_item.set_text(s.tray_open);

@@ -4,6 +4,7 @@ mod config;
 mod i18n;
 mod launcher;
 mod monitor;
+mod policy;
 mod tray;
 mod ui;
 mod update;
@@ -60,6 +61,8 @@ fn main() -> eframe::Result {
         }
     }
     let cfg = Arc::new(Mutex::new(initial_cfg));
+    // Optional admin policy (enforced rules); absent file = feature off.
+    let policy = Arc::new(policy::Handle::new());
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
     let (tray_tx, tray_rx) = mpsc::channel();
@@ -89,10 +92,11 @@ fn main() -> eframe::Result {
             let ctx = cc.egui_ctx.clone();
 
             let monitor_cfg = cfg_for_app.clone();
+            let monitor_policy = policy.clone();
             let monitor_ctx = ctx.clone();
             let own_pid = win::my_pid();
             std::thread::spawn(move || {
-                monitor::run(monitor_cfg, cmd_rx, evt_tx, monitor_ctx, own_pid);
+                monitor::run(monitor_cfg, monitor_policy, cmd_rx, evt_tx, monitor_ctx, own_pid);
             });
 
             let (paused, lang) = {
@@ -104,6 +108,7 @@ fn main() -> eframe::Result {
 
             Ok(Box::new(ui::App::new(
                 cfg_for_app,
+                policy,
                 cmd_tx,
                 evt_rx,
                 tray_rx,

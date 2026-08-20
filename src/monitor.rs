@@ -276,6 +276,7 @@ fn execute(actions: Vec<Action>) {
 
 pub fn run(
     cfg: Arc<Mutex<Config>>,
+    policy: Arc<crate::policy::Handle>,
     rx: Receiver<MonitorCmd>,
     tx: Sender<MonitorEvent>,
     ctx: eframe::egui::Context,
@@ -298,6 +299,12 @@ pub fn run(
                 execute(actions);
             }
             Err(RecvTimeoutError::Timeout) => {
+                // Pick up admin policy edits without a restart; wake the UI
+                // so locked controls follow.
+                if policy.refresh_if_due() {
+                    ctx.request_repaint();
+                }
+
                 // Bind requests handed over by a `--launch` wrapper instance.
                 let spooled = crate::launcher::drain_spool();
                 if !spooled.is_empty() {
@@ -321,7 +328,9 @@ pub fn run(
                     );
                 }
 
-                let config = cfg.lock().unwrap().clone();
+                let user_cfg = cfg.lock().unwrap().clone();
+                let config =
+                    crate::policy::effective_config(&user_cfg, policy.policy().as_ref());
                 let snap = build_snapshot(&engine, own_pid);
                 let mut events = Vec::new();
                 let mut actions = Vec::new();

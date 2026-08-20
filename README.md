@@ -90,6 +90,16 @@ path = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # optional; enab
 Elevated (admin) processes cannot be managed from a non-elevated instance and
 are shown grayed out.
 
+## Admin-managed policy (optional)
+
+For managed environments (e.g. RDP terminal servers), an administrator can
+enforce rules that users see but cannot edit, remove, or pause away. Drop a
+`policy.toml` into `%ProgramData%\auto-idle-close\` (a location standard
+users cannot modify) and every instance on the machine picks it up within
+seconds — no restart needed. Without the file the app behaves exactly as
+before. See [docs/admin-policy.md](docs/admin-policy.md) for the file format,
+deployment, and hardening notes.
+
 ## Downloads, SmartScreen, and verifying releases
 
 Two flavours per release, both containing the same exe:

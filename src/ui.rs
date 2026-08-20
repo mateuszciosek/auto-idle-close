@@ -10,6 +10,7 @@ use crate::config::{self, Config, Rule};
 use crate::i18n::{self, Language, Strings, fmt};
 use crate::launcher;
 use crate::monitor::{MonitorCmd, MonitorEvent};
+use crate::policy;
 use crate::tray::{Tray, TrayMsg};
 use crate::update;
 use crate::win;
@@ -42,6 +43,8 @@ struct AppRow {
 /// they touch lives behind this.
 struct Shared {
     cfg: Arc<Mutex<Config>>,
+    /// Admin policy (enforced rules the UI shows but never edits).
+    policy: Arc<policy::Handle>,
     log: Mutex<VecDeque<(Instant, String)>>,
     /// Time of the last unsaved edit (drives the debounced save).
     dirty_since: Mutex<Option<Instant>>,
@@ -84,11 +87,14 @@ pub struct App {
     last_strings: &'static Strings,
     save_error: Option<String>,
     allow_exit: bool,
+    /// Mirrors (allow_pause, allow_exit) so tray items follow policy edits.
+    last_policy_flags: (bool, bool),
 }
 
 impl App {
     pub fn new(
         cfg: Arc<Mutex<Config>>,
+        policy: Arc<policy::Handle>,
         cmd_tx: Sender<MonitorCmd>,
         evt_rx: Receiver<MonitorEvent>,
         tray_rx: Receiver<TrayMsg>,
@@ -101,6 +107,7 @@ impl App {
         Self {
             shared: Arc::new(Shared {
                 cfg,
+                policy,
                 log: Mutex::new(VecDeque::new()),
                 dirty_since: Mutex::new(None),
                 ctx_menu_installed: AtomicBool::new(launcher::context_menu_installed()),
@@ -123,6 +130,7 @@ impl App {
             last_strings,
             save_error: None,
             allow_exit: false,
+            last_policy_flags: (true, true),
         }
     }
 
@@ -139,6 +147,11 @@ impl App {
                     ctx.send_viewport_cmd(ViewportCommand::Focus);
                 }
                 TrayMsg::TogglePause => {
+                    // The item is greyed out under policy, but the handler
+                    // guards too in case a click raced a policy reload.
+                    if !self.shared.policy.allow_pause() {
+                        continue;
+                    }
                     let paused = {
                         let mut cfg = self.shared.cfg.lock().unwrap();
                         cfg.paused = !cfg.paused;
@@ -150,6 +163,9 @@ impl App {
                     );
                 }
                 TrayMsg::Exit => {
+                    if !self.shared.policy.allow_exit() {
+                        continue;
+                    }
                     self.allow_exit = true;
                     let _ = self.cmd_tx.send(MonitorCmd::Shutdown);
                     self.save_now();
@@ -288,6 +304,7 @@ impl App {
         ui.add_space(4.0);
 
         let filter = self.app_filter.trim().to_lowercase();
+        let pol = self.shared.policy.policy();
         egui::ScrollArea::vertical()
             .id_salt("running")
             .max_height(240.0)
@@ -310,6 +327,23 @@ impl App {
                                 ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
                                 ui.label(RichText::new(truncate(&row.title, 44)).weak());
                                 ui.label(RichText::new(s.admin_row).weak().small());
+                                return;
+                            }
+                            if let Some(rule) =
+                                pol.as_ref().and_then(|p| p.rule_for(&row.exe))
+                            {
+                                let mut checked = rule.enabled;
+                                ui.add_enabled(false, egui::Checkbox::new(&mut checked, ""));
+                                ui.label(
+                                    RichText::new(truncate(&row.title, 44)).strong(),
+                                )
+                                .on_hover_text(&row.title);
+                                ui.label(RichText::new(&row.exe).weak().small());
+                                ui.label(
+                                    RichText::new(format!("({})", s.policy_managed_hint))
+                                        .weak()
+                                        .small(),
+                                );
                                 return;
                             }
                             let mut checked =
@@ -355,15 +389,59 @@ impl App {
 
     fn section_rules(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         ui.heading(s.sec_rules);
+        let pol = self.shared.policy.policy();
+
+        // Policy rules first: visible with the same layout, but locked.
+        if let Some(pol) = &pol {
+            for rule in &pol.rules {
+                let mut enabled = rule.enabled;
+                let mut minutes = rule.timeout_minutes;
+                let mut force_kill = rule.force_kill;
+                let mut kill_secs = rule.force_kill_after_secs;
+                ui.horizontal(|ui| {
+                    ui.add_enabled(false, egui::Checkbox::new(&mut enabled, ""));
+                    ui.label(RichText::new(&rule.exe).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("({})", s.policy_managed_hint))
+                                .weak()
+                                .small(),
+                        );
+                        ui.add_enabled(
+                            false,
+                            egui::DragValue::new(&mut kill_secs)
+                                .range(5..=600)
+                                .suffix(" s"),
+                        );
+                        ui.add_enabled(
+                            false,
+                            egui::Checkbox::new(&mut force_kill, s.force_after),
+                        );
+                        ui.add_enabled(
+                            false,
+                            egui::DragValue::new(&mut minutes)
+                                .range(1..=1440)
+                                .suffix(" min"),
+                        );
+                        ui.label(s.close_after_idle);
+                    });
+                });
+            }
+        }
+
         let mut start_actions: Vec<(String, String)> = Vec::new();
         let mut shortcut_actions: Vec<(String, String)> = Vec::new();
         let mut dirty = false;
         let mut cfg = self.shared.cfg.lock().unwrap();
-        if cfg.rules.is_empty() {
+        if cfg.rules.is_empty() && pol.as_ref().is_none_or(|p| p.rules.is_empty()) {
             ui.label(RichText::new(s.no_rules).weak());
         }
         let mut remove: Option<usize> = None;
         for (i, rule) in cfg.rules.iter_mut().enumerate() {
+            // A user rule shadowed by a policy rule is inert — hide it.
+            if pol.as_ref().is_some_and(|p| p.rule_for(&rule.exe).is_some()) {
+                continue;
+            }
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut rule.enabled, "").changed() {
                     dirty = true;
@@ -461,21 +539,33 @@ impl App {
                 if !exe.contains('.') {
                     exe.push_str(".exe");
                 }
-                let mut cfg = self.shared.cfg.lock().unwrap();
-                if cfg.rule_for(&exe).is_none() {
-                    cfg.rules.push(Rule { exe, ..Default::default() });
-                    drop(cfg);
-                    self.shared.mark_dirty();
+                if self.shared.policy.is_managed(&exe) {
+                    self.shared.push_log(fmt(s.log_rule_managed, &exe));
+                } else {
+                    let mut cfg = self.shared.cfg.lock().unwrap();
+                    if cfg.rule_for(&exe).is_none() {
+                        cfg.rules.push(Rule { exe, ..Default::default() });
+                        drop(cfg);
+                        self.shared.mark_dirty();
+                    }
                 }
                 self.add_rule_text.clear();
             }
             if ui.button(s.browse_btn).on_hover_text(s.browse_hint).clicked() {
                 if let Some(path) = win::pick_exe_file() {
-                    let mut cfg = self.shared.cfg.lock().unwrap();
-                    if let Some(exe) = cfg.bind_path(&path) {
-                        drop(cfg);
-                        self.shared.mark_dirty();
-                        self.shared.push_log(fmt(s.log_rule_added, &exe));
+                    let picked_exe = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase())
+                        .unwrap_or_default();
+                    if self.shared.policy.is_managed(&picked_exe) {
+                        self.shared.push_log(fmt(s.log_rule_managed, &picked_exe));
+                    } else {
+                        let mut cfg = self.shared.cfg.lock().unwrap();
+                        if let Some(exe) = cfg.bind_path(&path) {
+                            drop(cfg);
+                            self.shared.mark_dirty();
+                            self.shared.push_log(fmt(s.log_rule_added, &exe));
+                        }
                     }
                 }
             }
@@ -523,9 +613,16 @@ impl App {
                             });
                         }
                         {
+                            let allow_pause = shared.policy.allow_pause();
                             let mut cfg = shared.cfg.lock().unwrap();
-                            let mut paused = cfg.paused;
-                            if ui.checkbox(&mut paused, s.pause_monitoring).changed() {
+                            let mut paused = cfg.paused && allow_pause;
+                            let resp = ui
+                                .add_enabled(
+                                    allow_pause,
+                                    egui::Checkbox::new(&mut paused, s.pause_monitoring),
+                                )
+                                .on_disabled_hover_text(s.policy_managed_hint);
+                            if resp.changed() {
                                 cfg.paused = paused;
                                 drop(cfg);
                                 shared.mark_dirty();
@@ -692,6 +789,38 @@ impl App {
                             .weak()
                             .small(),
                         );
+                        match shared.policy.snapshot() {
+                            policy::Load::Absent => {}
+                            policy::Load::Loaded(_) => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}{}",
+                                        s.policy_prefix,
+                                        policy::policy_path().display()
+                                    ))
+                                    .weak()
+                                    .small(),
+                                );
+                                ui.label(
+                                    RichText::new(s.policy_banner).weak().small(),
+                                );
+                            }
+                            policy::Load::Error(e) => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}{}",
+                                        s.policy_prefix,
+                                        policy::policy_path().display()
+                                    ))
+                                    .weak()
+                                    .small(),
+                                );
+                                ui.colored_label(
+                                    Color32::from_rgb(220, 60, 60),
+                                    RichText::new(fmt(s.policy_error_fmt, e)).small(),
+                                );
+                            }
+                        }
                     });
                 });
             },
@@ -810,6 +939,26 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
+
+        // Keep the tray items in sync with the admin policy, and clear a
+        // stored pause the policy forbids (the monitor already ignores it;
+        // this makes the UI agree).
+        let policy_flags = (
+            self.shared.policy.allow_pause(),
+            self.shared.policy.allow_exit(),
+        );
+        if policy_flags != self.last_policy_flags {
+            self.last_policy_flags = policy_flags;
+            self.tray.apply_policy(policy_flags.0, policy_flags.1);
+        }
+        if !policy_flags.0 {
+            let mut cfg = self.shared.cfg.lock().unwrap();
+            if cfg.paused {
+                cfg.paused = false;
+                drop(cfg);
+                self.shared.mark_dirty();
+            }
         }
 
         // Keep the tray in sync with pause/language edits from any window.
