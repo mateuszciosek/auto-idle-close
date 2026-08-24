@@ -1,0 +1,18 @@
+[package]
+name = "aic-victim"
+version = "0.1.0"
+edition = "2024"
+description = "Bench helper: a plain window that can be told to ignore WM_CLOSE"
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
+]
+
+[profile.release]
+opt-level = "z"
+strip = true

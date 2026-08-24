@@ -184,6 +184,9 @@ impl App {
                 MonitorEvent::WarningCancelled { pid } => {
                     warnings.retain(|w| w.pid != pid);
                 }
+                MonitorEvent::ClosingStarted { pid } => {
+                    warnings.retain(|w| w.pid != pid);
+                }
                 MonitorEvent::Closed { pid, exe, forced } => {
                     warnings.retain(|w| w.pid != pid);
                     drop(warnings);
@@ -830,13 +833,22 @@ impl App {
     /// Countdown popup as a deferred viewport (an immediate viewport would
     /// panic while the main window is hidden to the tray).
     fn warning_popup(&mut self, ctx: &egui::Context) {
-        let count = self.warnings.lock().unwrap().len();
+        let count = {
+            let mut warnings = self.warnings.lock().unwrap();
+            // Safety net: a warning whose deadline passed long ago means its
+            // ClosingStarted/Closed event got lost — drop it rather than
+            // repainting an always-on-top "0 s" popup forever.
+            let now = Instant::now();
+            warnings
+                .retain(|w| now < w.deadline + Duration::from_secs(30));
+            warnings.len()
+        };
         if count == 0 {
             return;
         }
         // Keep the root's pass loop alive so the viewport stays registered
         // (and gets pruned promptly once the last warning is gone).
-        ctx.request_repaint_after(Duration::from_millis(300));
+        ctx.request_repaint_after(Duration::from_millis(500));
 
         let width = 340.0;
         let height = 14.0 + 52.0 * count as f32;
@@ -859,8 +871,9 @@ impl App {
                 .with_resizable(false)
                 .with_taskbar(false),
             move |ui, _class| {
-                // Tick the countdown text.
-                ui.ctx().request_repaint_after(Duration::from_millis(250));
+                // Tick the countdown text (whole seconds, so 2 Hz is plenty —
+                // every repaint is a software render in RDP sessions).
+                ui.ctx().request_repaint_after(Duration::from_millis(500));
                 egui::CentralPanel::default().show(ui, |ui| {
                     let mut acted: Vec<(u32, MonitorCmd)> = Vec::new();
                     for w in warnings.lock().unwrap().iter() {
@@ -908,6 +921,7 @@ impl eframe::App for App {
     /// thread and tray handlers do). Everything that must keep working while
     /// hidden lives here: channels, exit flow, and the extra viewports.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        trace_frame(ctx, &self.warnings);
         self.drain_channels(ctx);
 
         // A verified update is staged in place of our exe: exit normally;
@@ -1047,6 +1061,35 @@ impl eframe::App for App {
             });
         });
     }
+}
+
+/// Field diagnostics, enabled with `AIC_TRACE=<log file>`: appends UI frame
+/// rate and egui repaint causes once per second. No-op (one env read) when
+/// the variable is unset.
+fn trace_frame(ctx: &egui::Context, warnings: &Mutex<Vec<ActiveWarning>>) {
+    use std::sync::OnceLock;
+    static TRACE: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    static STATE: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+    let Some(path) = TRACE.get_or_init(|| std::env::var("AIC_TRACE").ok().map(Into::into)) else {
+        return;
+    };
+    let mut state = STATE.lock().unwrap();
+    let (start, frames) = state.get_or_insert((Instant::now(), 0));
+    *frames += 1;
+    if start.elapsed() < Duration::from_secs(1) {
+        return;
+    }
+    let causes: Vec<String> = ctx.repaint_causes().iter().map(|c| format!("{c}")).collect();
+    let line = format!(
+        "fps={} warnings={} causes={causes:?}\n",
+        *frames,
+        warnings.lock().unwrap().len()
+    );
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    *state = Some((Instant::now(), 0));
 }
 
 fn truncate(s: &str, max: usize) -> String {

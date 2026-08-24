@@ -23,6 +23,9 @@ pub enum MonitorCmd {
 pub enum MonitorEvent {
     WarningStarted { pid: u32, exe: String, deadline: Instant },
     WarningCancelled { pid: u32 },
+    /// The countdown expired and WM_CLOSE went out; the popup entry for this
+    /// pid must be dropped (the close may take minutes when force-kill waits).
+    ClosingStarted { pid: u32 },
     Closed { pid: u32, exe: String, forced: bool },
     CloseFailed { pid: u32, exe: String },
     /// An app was bound (rule added/enabled) via the `--launch` wrapper.
@@ -208,14 +211,26 @@ impl Engine {
                     if now >= deadline {
                         actions.push(Action::PostClose(entry.hwnds.clone()));
                         entry.state = State::Closing { since: now, killed: false };
+                        events.push(MonitorEvent::ClosingStarted { pid: *pid });
                     }
                 }
                 State::Closing { since, killed } => {
                     let elapsed = now.saturating_duration_since(since);
                     if rule.force_kill {
-                        if !killed && elapsed >= Duration::from_secs(u64::from(rule.force_kill_after_secs)) {
+                        let kill_after =
+                            Duration::from_secs(u64::from(rule.force_kill_after_secs));
+                        if !killed && elapsed >= kill_after {
                             actions.push(Action::Terminate(*pid));
                             entry.state = State::Closing { since, killed: true };
+                        } else if killed && elapsed >= kill_after + CLOSE_GRACE {
+                            // TerminateProcess had no effect (elevated app: UIPI
+                            // also swallowed our WM_CLOSE). Give up instead of
+                            // sitting in Closing forever.
+                            entry.state = State::Active { last_fg: now };
+                            events.push(MonitorEvent::CloseFailed {
+                                pid: *pid,
+                                exe: entry.exe.clone(),
+                            });
                         }
                     } else if elapsed >= CLOSE_GRACE {
                         // App ignored WM_CLOSE (unsaved-changes dialog?). Give up,
@@ -232,7 +247,11 @@ impl Engine {
     }
 }
 
-fn build_snapshot(engine: &Engine, own_pid: u32) -> WorldSnapshot {
+fn build_snapshot(
+    engine: &Engine,
+    own_pid: u32,
+    exe_cache: &mut HashMap<u32, Option<String>>,
+) -> WorldSnapshot {
     let windows = win::enum_top_windows();
     let mut exe_by_pid = HashMap::new();
     let mut hwnds_by_pid: HashMap<u32, Vec<isize>> = HashMap::new();
@@ -241,12 +260,16 @@ fn build_snapshot(engine: &Engine, own_pid: u32) -> WorldSnapshot {
             continue;
         }
         hwnds_by_pid.entry(w.pid).or_default().push(w.hwnd);
-        if !exe_by_pid.contains_key(&w.pid) {
-            if let Some(exe) = win::exe_name_for_pid(w.pid) {
-                exe_by_pid.insert(w.pid, exe);
-            }
+        // Exe names are cached across ticks: OpenProcess + QueryFullProcessImageName
+        // for every windowed process every second adds up on busy sessions.
+        let exe = exe_cache
+            .entry(w.pid)
+            .or_insert_with(|| win::exe_name_for_pid(w.pid));
+        if let Some(exe) = exe {
+            exe_by_pid.entry(w.pid).or_insert_with(|| exe.clone());
         }
     }
+    exe_cache.retain(|pid, _| hwnds_by_pid.contains_key(pid));
     let closing_alive = engine
         .closing_pids()
         .into_iter()
@@ -283,6 +306,7 @@ pub fn run(
     own_pid: u32,
 ) {
     let mut engine = Engine::new();
+    let mut exe_cache: HashMap<u32, Option<String>> = HashMap::new();
     let mut next_tick = Instant::now();
     loop {
         let wait = next_tick.saturating_duration_since(Instant::now());
@@ -328,10 +352,23 @@ pub fn run(
                     );
                 }
 
+                // Watchdog against an eframe 0.35 event-loop bug: when a
+                // viewport (warning popup, settings) is destroyed while a
+                // redraw it requested is still undelivered, the winit loop is
+                // left in ControlFlow::Poll with an empty repaint schedule and
+                // busy-spins at 100% of a core until the next repaint. Keeping
+                // a repaint permanently scheduled means the loop always resets
+                // to WaitUntil, so the spin can never take hold. Costs one
+                // hidden-window paint every 2 s.
+                ctx.request_repaint_after_for(
+                    Duration::from_secs(2),
+                    eframe::egui::ViewportId::ROOT,
+                );
+
                 let user_cfg = cfg.lock().unwrap().clone();
                 let config =
                     crate::policy::effective_config(&user_cfg, policy.policy().as_ref());
-                let snap = build_snapshot(&engine, own_pid);
+                let snap = build_snapshot(&engine, own_pid, &mut exe_cache);
                 let mut events = Vec::new();
                 let mut actions = Vec::new();
                 engine.tick(Instant::now(), &snap, &config, &mut events, &mut actions);
@@ -538,6 +575,65 @@ mod tests {
         assert!(matches!(
             events.as_slice(),
             [MonitorEvent::Closed { pid: 100, forced: true, .. }]
+        ));
+    }
+
+    #[test]
+    fn closing_started_event_clears_warning() {
+        let cfg = cfg_with(5, 60, false);
+        let mut engine = Engine::new();
+        let t0 = Instant::now();
+        let world = snap(&[(100, "notepad.exe")], None);
+
+        run_tick(&mut engine, t0, &world, &cfg);
+        run_tick(&mut engine, t0 + 4 * MIN, &world, &cfg);
+
+        // At the deadline the UI must be told to drop the popup entry.
+        let (events, actions) = run_tick(&mut engine, t0 + 5 * MIN, &world, &cfg);
+        assert!(matches!(actions.as_slice(), [Action::PostClose(_)]));
+        assert!(matches!(
+            events.as_slice(),
+            [MonitorEvent::ClosingStarted { pid: 100 }]
+        ));
+    }
+
+    #[test]
+    fn unkillable_process_gives_up_instead_of_sticking() {
+        let cfg = cfg_with(5, 60, true); // force_kill, kill after 30 s
+        let mut engine = Engine::new();
+        let t0 = Instant::now();
+        let world = snap(&[(100, "notepad.exe")], None);
+
+        run_tick(&mut engine, t0, &world, &cfg);
+        run_tick(&mut engine, t0 + 4 * MIN, &world, &cfg);
+        run_tick(&mut engine, t0 + 5 * MIN, &world, &cfg);
+        let (_, actions) = run_tick(
+            &mut engine,
+            t0 + 5 * MIN + Duration::from_secs(30),
+            &snap_closing(100, true),
+            &cfg,
+        );
+        assert!(matches!(actions.as_slice(), [Action::Terminate(100)]));
+
+        // TerminateProcess had no effect (elevated app). After the grace
+        // period we give up with CloseFailed instead of looping forever.
+        let t_giveup = t0 + 5 * MIN + Duration::from_secs(30) + CLOSE_GRACE;
+        let mut alive = snap(&[(100, "notepad.exe")], None);
+        alive.closing_alive = [(100, true)].into();
+        let (events, actions) = run_tick(&mut engine, t_giveup, &alive, &cfg);
+        assert!(actions.is_empty());
+        assert!(matches!(
+            events.as_slice(),
+            [MonitorEvent::CloseFailed { pid: 100, .. }]
+        ));
+
+        // Fresh timer afterwards: warns again only after timeout - warn lead.
+        let (events, _) = run_tick(&mut engine, t_giveup + 3 * MIN, &alive, &cfg);
+        assert!(events.is_empty());
+        let (events, _) = run_tick(&mut engine, t_giveup + 4 * MIN, &alive, &cfg);
+        assert!(matches!(
+            events.as_slice(),
+            [MonitorEvent::WarningStarted { pid: 100, .. }]
         ));
     }
 
