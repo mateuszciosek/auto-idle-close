@@ -1,11 +1,14 @@
 //! All unsafe Win32 access is confined to this module.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM,
     STILL_ACTIVE, WPARAM,
 };
-use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_CLOAK, DWMWA_CLOAKED, DwmGetWindowAttribute, DwmSetWindowAttribute,
+};
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcessId, GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
@@ -216,6 +219,49 @@ pub fn system_language_is_polish() -> bool {
     const LANG_POLISH: u16 = 0x15;
     let langid = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
     (langid & 0x3FF) == LANG_POLISH
+}
+
+// ---------------------------------------------------------------------------
+// Start hidden in the tray (--tray)
+// ---------------------------------------------------------------------------
+//
+// eframe 0.35 creates every root window hidden and then unconditionally
+// calls `set_visible(true)` after the first painted frame
+// (EpiIntegration::post_rendering), ignoring `ViewportBuilder::with_visible
+// (false)`. Hidden windows are painted too, so a `--tray` start popped the
+// main window up about a second after launch. That forced ShowWindow cannot
+// be vetoed (stripping SWP_SHOWWINDOW in WM_WINDOWPOSCHANGING does not stop
+// it), so instead the window is DWM-cloaked until the app has hidden it
+// again: a cloaked window is never composited and gets no taskbar button.
+
+/// HWND of the main window while it is cloaked; 0 = not cloaked.
+static CLOAKED_MAIN: AtomicIsize = AtomicIsize::new(0);
+
+fn set_cloak(hwnd: isize, cloak: bool) {
+    let value = BOOL::from(cloak);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            HWND(hwnd as *mut core::ffi::c_void),
+            DWMWA_CLOAK,
+            &value as *const BOOL as *const core::ffi::c_void,
+            std::mem::size_of::<BOOL>() as u32,
+        );
+    }
+}
+
+/// Keep the main window off the screen even while it is "shown", until
+/// [`allow_show`].
+pub fn suppress_show(hwnd: isize) {
+    CLOAKED_MAIN.store(hwnd, Ordering::Relaxed);
+    set_cloak(hwnd, true);
+}
+
+/// Undo [`suppress_show`]: from now on showing the window really shows it.
+pub fn allow_show() {
+    let hwnd = CLOAKED_MAIN.swap(0, Ordering::Relaxed);
+    if hwnd != 0 {
+        set_cloak(hwnd, false);
+    }
 }
 
 /// Returns false if another instance already holds the mutex.

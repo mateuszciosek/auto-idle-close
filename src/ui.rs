@@ -89,6 +89,18 @@ pub struct App {
     allow_exit: bool,
     /// Mirrors (allow_pause, allow_exit) so tray items follow policy edits.
     last_policy_flags: (bool, bool),
+    tray_start: TrayStart,
+}
+
+/// Startup sequence of a `--tray` launch (see `win::suppress_show`).
+#[derive(Clone, Copy, PartialEq)]
+enum TrayStart {
+    /// First frame: eframe is about to force-show the (cloaked) window; we
+    /// queue the command that hides it again.
+    FirstFrame,
+    /// Second frame: the window is hidden for real, lift the cloak.
+    Disarm,
+    Done,
 }
 
 impl App {
@@ -131,6 +143,11 @@ impl App {
             save_error: None,
             allow_exit: false,
             last_policy_flags: (true, true),
+            tray_start: if launcher::start_in_tray() {
+                TrayStart::FirstFrame
+            } else {
+                TrayStart::Done
+            },
         }
     }
 
@@ -143,6 +160,10 @@ impl App {
         while let Ok(msg) = self.tray_rx.try_recv() {
             match msg {
                 TrayMsg::OpenSettings => {
+                    // The user wants the window: make sure the --tray
+                    // startup cloak is gone.
+                    win::allow_show();
+                    self.tray_start = TrayStart::Done;
                     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(ViewportCommand::Focus);
                 }
@@ -922,6 +943,23 @@ impl eframe::App for App {
     /// hidden lives here: channels, exit flow, and the extra viewports.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         trace_frame(ctx, &self.warnings);
+
+        // --tray start: eframe force-shows the window right after this first
+        // frame. The DWM cloak keeps that off the screen; Visible(false)
+        // (applied after the forced show, within this same frame) hides the
+        // window for real, and the next frame lifts the cloak.
+        match self.tray_start {
+            TrayStart::FirstFrame => {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                self.tray_start = TrayStart::Disarm;
+            }
+            TrayStart::Disarm => {
+                win::allow_show();
+                self.tray_start = TrayStart::Done;
+            }
+            TrayStart::Done => {}
+        }
+
         self.drain_channels(ctx);
 
         // A verified update is staged in place of our exe: exit normally;

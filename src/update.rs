@@ -269,23 +269,39 @@ fn refresh_installed_version(dir: &Path, tag: &str) {
 }
 
 /// Detached helper that starts the new exe once this process has exited
-/// (the single-instance mutex is only released then).
+/// (the single-instance mutex is only released then). An instance that was
+/// started hidden in the tray comes back the same way.
 fn spawn_relauncher(exe: &Path) {
     use std::os::windows::process::CommandExt;
-    let ps = format!(
-        "Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -FilePath '{}'",
-        std::process::id(),
-        exe.to_string_lossy().replace('\'', "''"),
-    );
+    let ps = relaunch_script(std::process::id(), exe, crate::launcher::start_in_tray());
     let _ = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn();
 }
 
+fn relaunch_script(pid: u32, exe: &Path, tray: bool) -> String {
+    format!(
+        "Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -FilePath '{}'{}",
+        pid,
+        exe.to_string_lossy().replace('\'', "''"),
+        if tray { " -ArgumentList '--tray'" } else { "" },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relaunch_keeps_tray_flag_and_quotes_path() {
+        let exe = Path::new(r"C:\It's Here\app.exe");
+        assert_eq!(
+            relaunch_script(42, exe, false),
+            r"Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\It''s Here\app.exe'"
+        );
+        assert!(relaunch_script(42, exe, true).ends_with(r"app.exe' -ArgumentList '--tray'"));
+    }
 
     #[test]
     fn version_parsing_and_ordering() {

@@ -91,6 +91,15 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
 
+            // eframe force-shows the window after its first frame; keep a
+            // --tray start off the screen through that (see win::suppress_show).
+            if launcher::start_in_tray() {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(RawWindowHandle::Win32(h)) = cc.window_handle().map(|h| h.as_raw()) {
+                    win::suppress_show(h.hwnd.get());
+                }
+            }
+
             let monitor_cfg = cfg_for_app.clone();
             let monitor_policy = policy.clone();
             let monitor_ctx = ctx.clone();
